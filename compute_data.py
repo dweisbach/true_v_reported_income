@@ -1,19 +1,29 @@
 # -*- coding: utf-8 -*-
 """
+Created on Wed Mar 25 08:38:47 2026
+@author: dweisbac
+
 compute_data.py
 Executes all simulations on the FULL population and exports lightweight CSV arrays.
 Maintains float64 precision for the extreme lognormal tail.
 """
 
+import warnings
 import numpy as np
 import pandas as pd
+from scipy.optimize import brentq
+from concurrent.futures import ProcessPoolExecutor
 import tax_model as tm
-import warnings
 
 warnings.filterwarnings("ignore")
 
-BETA_VALS = np.round(np.arange(-0.10, 0.11, 0.05), 2)
-SIGMA_VALS = np.round(np.arange(0.0, 1.8, 0.2), 1)
+# =============================================================================
+# GLOBAL CONSTANTS
+# =============================================================================
+TARGET_MEAN = 65000
+BASE_EVASION = 0.10  # Matches empirical aggregate tax gap
+BETA_VALS = np.round(np.arange(-0.10, 0.31, 0.05), 2)
+SIGMA_VALS = np.round(np.arange(0.0, 3.1, 0.2), 1)
 
 def gini(x):
     sorted_x = np.sort(x)
@@ -21,345 +31,437 @@ def gini(x):
     index = np.arange(1, n + 1)
     return (2 * np.sum(index * sorted_x)) / (n * np.sum(sorted_x)) - (n + 1) / n
 
+
+# =============================================================================
+# MATH ENGINE
+# =============================================================================
+def target_share_error(guess, shocks, beta, snu, inc_dist, noise_dist, ev_seed, k1_cal):
+    """Objective function for the solver, moved outside to fix scoping errors."""
+    if inc_dist == 'lognormal':
+        mu = np.log(TARGET_MEAN) - (guess**2 / 2)
+        y_temp = np.exp(mu + guess * shocks)
+    elif inc_dist == 'pareto':
+        y_min = TARGET_MEAN * (guess - 1.0) / guess
+        y_temp = y_min * (1.0 - shocks)**(-1.0 / guess)
+        
+    y_rep_temp, _ = tm.apply_evasion(
+        y_temp, beta, snu, mode='loglinear', 
+        noise_dist=noise_dist, z_type='log_income', 
+        base_evasion=BASE_EVASION, seed=ev_seed
+    )
+    share = np.partition(y_rep_temp, -k1_cal)[-k1_cal:].sum() / y_rep_temp.sum()
+    return share - 0.20
+
+
+def calibrate_theta_baseline(n_agents, inc_dist, noise_dist):
+    """
+    Calibrates the distribution parameter (theta) once at the neutral baseline 
+    (Beta=0, Sigma=0) to achieve a 20% Top 1% share.
+    """
+    print(f"--- Running One-Time Baseline Calibration for {inc_dist.upper()} ---")
+    n_cal = min(n_agents, 2000000) 
+    np.random.seed(42)
+    
+    if inc_dist == 'lognormal':
+        shocks = np.random.randn(n_cal)
+        box = (0.1, 4.0)
+    else:
+        shocks = np.random.rand(n_cal)
+        box = (1.05, 5.0)
+        
+    k1 = int(n_cal * 0.01)
+    args = (shocks, 0.0, 0.0, inc_dist, noise_dist, 43, k1)
+    
+    theta_baseline = brentq(target_share_error, box[0], box[1], args=args, xtol=1e-6)
+    print(f"  Baseline Theta Found: {theta_baseline:.6f}")
+    return theta_baseline
+
+
+def _build_economy(beta, snu, n_agents, inc_dist, noise_dist, seed=42, ev_seed=43, n_cal_agents=None, fixed_theta=None):
+    # 1. CALIBRATION (Uses small proxy, no memory risk here)
+    if fixed_theta is not None:
+        cal_param = fixed_theta
+    else:
+        if n_cal_agents is None:
+            n_cal_agents = n_agents
+            
+        np.random.seed(seed)
+        
+        if inc_dist == 'lognormal':
+            cal_shocks = np.random.randn(n_cal_agents)
+            search_boxes = [(0.1, 4.0), (0.01, 10.0)]
+        else:
+            cal_shocks = np.random.rand(n_cal_agents)
+            search_boxes = [(1.05, 5.0), (1.001, 25.0)]
+            
+        k1_cal = int(n_cal_agents * 0.01)
+        solver_args = (cal_shocks, beta, snu, inc_dist, noise_dist, ev_seed, k1_cal)
+        
+        cal_param = None
+        for box in search_boxes:
+            try:
+                cal_param = brentq(target_share_error, box[0], box[1], args=solver_args, xtol=1e-5)
+                break
+            except ValueError:
+                continue
+
+        # Cleanup calibration array immediately
+        del cal_shocks 
+
+    # 2. FINAL GENERATION (The Memory-Critical Part)
+    np.random.seed(seed)
+    
+    # Generate shocks directly in the final container to save one full array copy
+    if inc_dist == 'lognormal':
+        y_true = np.random.randn(n_agents) # Start with Z ~ N(0,1)
+        mu_f = np.log(TARGET_MEAN) - (cal_param**2 / 2)
+        # Use in-place math: y = exp(mu + sigma * Z)
+        y_true *= cal_param
+        y_true += mu_f
+        np.exp(y_true, out=y_true) # In-place exponentiation
+    else:
+        y_true = np.random.rand(n_agents) # Start with U ~ U(0,1)
+        y_min_f = TARGET_MEAN * (cal_param - 1.0) / cal_param
+        # In-place Pareto: y = y_min * (1-U)^(-1/alpha)
+        y_true -= 1.0
+        y_true *= -1.0
+        np.power(y_true, -1.0/cal_param, out=y_true)
+        y_true *= y_min_f
+        
+    # Apply evasion (tm.apply_evasion handles the internal memory for y_rep)
+    y_rep, ev_rates = tm.apply_evasion(
+        y_true, beta, snu, mode='loglinear', 
+        noise_dist=noise_dist, z_type='log_income', 
+        base_evasion=BASE_EVASION, seed=ev_seed
+    )
+    
+    return y_true, y_rep, ev_rates, cal_param
+
 # =============================================================================
 # 1. CORE GRID COMPUTATIONS
 # =============================================================================
-def compute_core_grid(n_agents=2000000):
-    print("--- COMPUTING CORE GRID DATA ---")
+
+def compute_single_cell(beta, snu, n_agents_final, inc_dist='lognormal', noise_dist='beta', fixed_theta=None):
+    """Computes standard stats for a single point in the grid using the unified engine."""
+    y_true, y_rep, ev_rates, _ = _build_economy(beta, snu, n_agents_final, inc_dist, noise_dist, fixed_theta=fixed_theta)
+    
+    k1 = int(n_agents_final * 0.01)
+    k01 = int(n_agents_final * 0.001)
+    
+    idx_r = np.argsort(y_rep)
+    idx_t = np.argsort(y_true)
+    total_true = y_true.sum()
+    total_rep = y_rep.sum()
+    
+    y_true_s = y_true[idx_t]
+    y_rep_s = y_rep[idx_r]
+    
+    s_true_given_rep = y_true[idx_r[-k1:]].sum() / total_true
+    
+    # --- OPTION A: Dollar-Weighted Evasion of the TRUE Top Percentiles ---
+    # 1. Identify the specific individuals in the True Top 1% and 0.1%
+    true_top1_idx = idx_t[-k1:]
+    true_top01_idx = idx_t[-k01:]
+    
+    # 2. Calculate their total true dollars and total reported dollars
+    true_dollars_1pct = y_true[true_top1_idx].sum()
+    rep_dollars_1pct = y_rep[true_top1_idx].sum()
+    
+    true_dollars_01pct = y_true[true_top01_idx].sum()
+    rep_dollars_01pct = y_rep[true_top01_idx].sum()
+    
+    # 3. Dollar-weighted evasion rate = (True $ - Rep $) / True $
+    rate_1pct = (true_dollars_1pct - rep_dollars_1pct) / true_dollars_1pct
+    rate_01pct = (true_dollars_01pct - rep_dollars_01pct) / true_dollars_01pct
+    
+    return {
+        'Beta': beta, 'Sigma': snu,
+        'gap_1pct': (y_rep_s[-k1:].sum() / total_rep) - (y_true_s[-k1:].sum() / total_true),
+        'gap_01pct': (y_rep_s[-k01:].sum() / total_rep) - (y_true_s[-k01:].sum() / total_true),
+        'rate_1pct': rate_1pct,
+        'rate_01pct': rate_01pct,
+        'gini_diff': gini(y_rep) - gini(y_true),
+        's_true': y_true_s[-k1:].sum() / total_true,
+        's_rep': y_rep_s[-k1:].sum() / total_rep,
+        's_true_given_rep': s_true_given_rep,
+        'agg_gap': (total_true - total_rep) / total_true
+    }
+
+
+def _cell_worker(args):
+    """Wrapper to unpack arguments for the parallel workers."""
+    return compute_single_cell(*args)
+
+
+def compute_robustness_grid_fixed(inc_dist, noise_dist, n_agents=10000000):
+    """
+    The optimized engine for the massive robustness heatmaps using a FIXED calibration.
+    Locks theta at the baseline (Beta=0, Sigma=0) for all cells.
+    """
+    # 1. Calibrate baseline theta once
+    theta_star = calibrate_theta_baseline(n_agents, inc_dist, noise_dist)
+    
+    print(f"\n--- COMPUTING FIXED-THETA GRID: {inc_dist.upper()} / {noise_dist.upper()} ({n_agents:,} AGENTS) ---")
+    
+    # We pack all 6 arguments into the task list for the worker
+    tasks = [(beta, snu, n_agents, inc_dist, noise_dist, theta_star) for beta in BETA_VALS for snu in SIGMA_VALS]
+    
+    with ProcessPoolExecutor(max_workers=14) as executor:
+        results = list(executor.map(_cell_worker, tasks))
+        
+    filename = f"data_fixed_theta_{inc_dist}_{noise_dist}.csv"
+    pd.DataFrame(results).to_csv(filename, index=False)
+    print(f"--- SAVED TO {filename} ---")
+
+
+def compute_robustness_grid(inc_dist, noise_dist, n_agents=10000000):
+    """
+    The optimized engine for the massive robustness heatmaps.
+    Now correctly passes inc_dist and noise_dist to the workers.
+    """
+    print(f"\n--- COMPUTING {inc_dist.upper()} / {noise_dist.upper()} ({n_agents:,} AGENTS) ---")
+    
+    # We pack all 5 arguments into the task list for the worker
+    tasks = [(beta, snu, n_agents, inc_dist, noise_dist) for beta in BETA_VALS for snu in SIGMA_VALS]
+    
+    with ProcessPoolExecutor(max_workers=14) as executor:
+        results = list(executor.map(_cell_worker, tasks))
+        
+    filename = f"data_big_{inc_dist}_{noise_dist}.csv"
+    pd.DataFrame(results).to_csv(filename, index=False)
+    print(f"--- SAVED TO {filename} ---")   
+    
+def compute_core_grid(n_agents=1000000):
+    """The baseline grid for the main text and Table 1."""
+    print(f"--- COMPUTING SMALL BASELINE GRID ({n_agents:,} AGENTS) ---")
     results = []
     
-    for beta in BETA_VALS:
-        for snu in SIGMA_VALS:
-            print(f"  Simulating Core Grid: Beta={beta:.2f}, Sigma={snu:.1f}...", end="\r")
-            df, _ = tm.get_calibrated_scenario('lognormal', beta=beta, sigma_nu=snu, mode='loglinear', n_agents=n_agents)
+    small_beta = [-0.10, -0.05, 0.00, 0.05, 0.10]
+    small_sigma = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6]
+    
+    for beta in small_beta:
+        for snu in small_sigma:
+            print(f"Computing Baseline Cell: Gamma={beta}, Sigma={snu}")
+            # Explicitly request 'normal' noise to match your original heatmaps
+            res = compute_single_cell(beta, snu, n_agents, noise_dist='beta')
+            results.append(res)
             
-            k1, k01 = int(n_agents*0.01), int(n_agents*0.001)
-            top1, top01 = df.nlargest(k1, 'True'), df.nlargest(k01, 'True')
-            top1_rep = df.nlargest(k1, 'Reported')
-            top01_rep = df.nlargest(k01, 'Reported')
-            
-            t1_share = top1['True'].sum() / df['True'].sum()
-            r1_share = top1_rep['Reported'].sum() / df['Reported'].sum()
-            t01_share = top01['True'].sum() / df['True'].sum()
-            r01_share = top01_rep['Reported'].sum() / df['Reported'].sum()
-            
-            results.append({
-                'Beta': beta, 'Sigma': snu,
-                'rate_1pct': (top1['True'] - top1['Reported']).sum() / top1['True'].sum(),
-                'rate_01pct': (top01['True'] - top01['Reported']).sum() / top01['True'].sum(),
-                'agg_gap': (df['True'].sum() - df['Reported'].sum()) / df['True'].sum(),
-                'gini_diff': gini(df['True'].values) - gini(df['Reported'].values),
-                'gap_1pct': t1_share - r1_share, 
-                'gap_01pct': t01_share - r01_share,
-                's_true': t1_share, 's_rep': r1_share, 
-                's_rep_given_true': df.loc[top1.index, 'Reported'].sum() / df['Reported'].sum()
-            })
-            
-            # --- EXACT MATH ON FULL POPULATION FOR KEY SCENARIOS ---
-            key_scenarios = [(0.10, 0.4), (0.10, 1.4), (-0.05, 0.4), (-0.05, 1.4)]
-            if (np.round(beta, 2), np.round(snu, 1)) in key_scenarios:
-                
-                # 1. Exact Share Lines
-                start_log, end_log = 1.0, 3.0
-                x_log = np.linspace(start_log, end_log, 50)
-                q_grid = 1 - 10**(-x_log)
-                
-                tot_r, tot_t = df['Reported'].sum(), df['True'].sum()
-                sort_r = df.sort_values('Reported', ascending=False)['Reported'].values
-                sort_t = df.sort_values('True', ascending=False)['True'].values
-                
-                rep_c, true_c = [], []
-                for q in q_grid:
-                    k = max(int(n_agents * (1 - q)), 1)
-                    rep_c.append(sort_r[:k].sum() / tot_r)
-                    true_c.append(sort_t[:k].sum() / tot_t)
-                pd.DataFrame({'x_log': x_log, 'rep_c': rep_c, 'true_c': true_c}).to_csv(f"data_core_lines_b{beta:.2f}_s{snu:.1f}.csv", index=False)
-                
-                # 2. Exact Bins & Evasion Profiles
-                bins_log = np.linspace(start_log, end_log, 21)
-                bins_q = 1 - 10**(-bins_log)
-                df['Rank_True'] = df['True'].rank(pct=True)
-                df['Bin'] = pd.cut(df['Rank_True'], bins=bins_q)
-                ev_profile = df.groupby('Bin', observed=False)['EvasionRate'].mean().values
-                bin_centers_log = (bins_log[:-1] + bins_log[1:]) / 2
-                pd.DataFrame({'bin_centers_log': bin_centers_log, 'ev_profile': ev_profile}).to_csv(f"data_core_bins_b{beta:.2f}_s{snu:.1f}.csv", index=False)
-                
-                lower, upper = df['True'].quantile(0.001), df['True'].quantile(0.999)
-                bins = np.logspace(np.log10(lower), np.log10(upper), 30)
-                centers = (bins[:-1] + bins[1:]) / 2
-                ev_true = df.groupby(pd.cut(df['True'], bins), observed=False)['EvasionRate'].mean().values
-                ev_rep = df.groupby(pd.cut(df['Reported'], bins), observed=False)['EvasionRate'].mean().values
-                pd.DataFrame({'centers': centers, 'ev_true': ev_true, 'ev_rep': ev_rep}).to_csv(f"data_core_evinc_b{beta:.2f}_s{snu:.1f}.csv", index=False)
-                
-                # 3. Visual KDE Sample (Safe to sample down for visual curves only)
-                df.sample(20000, random_state=42).to_csv(f"data_core_kde_b{beta:.2f}_s{snu:.1f}.csv", index=False)
-                
     pd.DataFrame(results).to_csv("data_core_grid.csv", index=False)
-    print("\nCore grid data saved.")
+    print("--- BASELINE GRID COMPLETE ---")
+
 
 # =============================================================================
-# 2. WALKTHROUGH CLEAN
+# 2. WALKTHROUGH & INTUITION COMPUTATIONS
 # =============================================================================
-def compute_walkthrough(n_agents=5000000):
-    print("--- COMPUTING WALKTHROUGH DATA ---")
-    TARGET_MEAN, BETA, SIGMA_NU = 65000, 0.05, 1.4
+def compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_dist='lognormal', noise_dist='beta'):
+    """
+    Computes scaled walkthrough data and Option A line-chart curves.
+    Uses a RAM-safe sample and scales aggregates to the full US population.
+    """
+    scale_factor = n_target_pop / n_agents_sample 
     
-    low, high, cal_sigma = 0.1, 4.0, 1.0
-    for _ in range(50):
-        guess = (low + high) / 2
-        np.random.seed(1234)
-        y_temp = np.random.lognormal(np.log(TARGET_MEAN) - (guess**2 / 2), guess, 100000)
-        y_rep_temp, _ = tm.apply_evasion(y_temp, BETA, SIGMA_NU, mode='loglinear', z_type='log_income')
-        share = np.sort(y_rep_temp)[-1000:].sum() / y_rep_temp.sum()
-        if abs(share - 0.20) < 0.00005: cal_sigma = guess; break
-        elif share < 0.20: low = guess
-        else: high = guess
-            
-    np.random.seed(42)
-    y_true = np.random.lognormal(np.log(TARGET_MEAN) - (cal_sigma**2 / 2), cal_sigma, n_agents)
-    y_rep, ev_rates = tm.apply_evasion(y_true, BETA, SIGMA_NU, mode='loglinear', z_type='log_income', seed=43)
+    print(f"--- COMPUTING SCALED WALKTHROUGH (Option A Consistent) ---")
+    print(f"Scaling factor: {scale_factor:.1f}x ({n_target_pop:,} target)")
+
+    BETA, SIGMA_NU = 0.05, 1.4
+    steps = [
+        ("1. Baseline", 0.00, 0.0),
+        ("2. Add Progressivity", BETA, 0.0),
+        ("3. Add Heterogeneity", BETA, SIGMA_NU)
+    ]
+
+    stats_list = []
+    # Placeholders for the final step data used in line charts
+    final_y_true, final_y_rep, final_idx_t, final_idx_r = None, None, None, None
+
+    for step_name, b, snu in steps:
+        # Generate via unified engine
+        y_true, y_rep, _, _ = _build_economy(
+            b, snu, n_agents_sample, inc_dist, noise_dist
+        )
+        
+        total_true = y_true.sum()
+        total_rep = y_rep.sum()
+        
+        # Consistent Tax Gap definition
+        stats_list.append({
+            'Step': step_name,
+            'Total_True_USD': total_true * scale_factor,
+            'Total_Reported_USD': total_rep * scale_factor,
+            'Tax_Gap': (total_true - total_rep) / total_true
+        })
+
+        # Capture the "Step 3" arrays for the line chart logic
+        if step_name == "3. Add Heterogeneity":
+            final_y_true = y_true
+            final_y_rep = y_rep
+            final_idx_t = np.argsort(y_true)
+            final_idx_r = np.argsort(y_rep)
+        else:
+            del y_true, y_rep # Save RAM on intermediate steps
+
+    # Save the 3-step table
+    pd.DataFrame(stats_list).to_csv("data_walkthrough_scaled_stats.csv", index=False)
+
+    # --- OPTION A LINE CHART LOGIC ---
+    print("Computing Dollar-Weighted Evasion Curves...")
+    grid_pct = np.logspace(0, -2, 100) # From Top 1% down to Top 0.01%
     
-    # 1. Exact Array Math on Full Population
-    grid_pct = np.logspace(0, -2, 100) 
-    tsort, rsort = np.sort(y_true), np.sort(y_rep)
-    idx_r, idx_t = np.argsort(y_rep), np.argsort(y_true)
-    ev_by_rep, ev_by_true = ev_rates[idx_r], ev_rates[idx_t]
-    
+    # Pre-sort for efficiency
+    true_sorted = final_y_true[final_idx_t]
+    rep_sorted = final_y_rep[final_idx_r]
+    rep_of_true_top = final_y_rep[final_idx_t]
+    true_of_rep_top = final_y_true[final_idx_r]
+
     ts, rs, es_rep, es_true = [], [], [], []
+    
     for p in grid_pct:
-        k = max(int(n_agents * (p/100)), 1)
-        ts.append(tsort[-k:].sum() / tsort.sum())
-        rs.append(rsort[-k:].sum() / rsort.sum())
-        es_rep.append(ev_by_rep[-k:].mean())   
-        es_true.append(ev_by_true[-k:].mean()) 
-
-    pd.DataFrame({'grid_pct': grid_pct, 'ts': ts, 'rs': rs, 'es_rep': es_rep, 'es_true': es_true}).to_csv("data_walkthrough_lines.csv", index=False)
-    pd.DataFrame([{'TargetMean': TARGET_MEAN, 'CalSigma': cal_sigma, 'Cutoff_True': np.percentile(y_true, 99), 'Cutoff_Rep': np.percentile(y_rep, 99)}]).to_csv("data_walkthrough_stats.csv", index=False)
-    
-    # 2. KDE Sample
-    pd.DataFrame({'True': y_true, 'Reported': y_rep, 'EvasionRate': ev_rates}).sample(20000, random_state=42).to_csv("data_walkthrough_kde.csv", index=False)
-    print("Walkthrough data saved.")
-
-# =============================================================================
-# 3. ROBUSTNESS (ADDITIVE & PARETO)
-# =============================================================================
-def compute_robustness_grid(n_agents=2000000):
-    print("--- COMPUTING PARETO/ADDITIVE ROBUSTNESS ---")
-    results = []
-    for beta in BETA_VALS:
-        for snu in SIGMA_VALS:
-            print(f"  Simulating Robustness: Beta={beta:.2f}, Sigma={snu:.1f}...", end="\r")
-            df_la, _ = tm.get_calibrated_scenario('lognormal', beta=beta, sigma_nu=snu, mode='additive', n_agents=n_agents)
-            k1, k01 = int(n_agents*0.01), int(n_agents*0.001)
-            la_1 = (df_la.nlargest(k1, 'True')['True'].sum()/df_la['True'].sum()) - (df_la.nlargest(k1, 'Reported')['Reported'].sum()/df_la['Reported'].sum())
-            la_01 = (df_la.nlargest(k01, 'True')['True'].sum()/df_la['True'].sum()) - (df_la.nlargest(k01, 'Reported')['Reported'].sum()/df_la['Reported'].sum())
-
-            df_pm, am = tm.get_calibrated_scenario('pareto', beta=beta, sigma_nu=snu, mode='loglinear', n_agents=n_agents)
-            pm_1 = (df_pm.nlargest(k1, 'True')['True'].sum()/df_pm['True'].sum()) - (df_pm.nlargest(k1, 'Reported')['Reported'].sum()/df_pm['Reported'].sum())
-                                
-            df_pa, aa = tm.get_calibrated_scenario('pareto', beta=beta, sigma_nu=snu, mode='additive', n_agents=n_agents)
-            pa_1 = (df_pa.nlargest(k1, 'True')['True'].sum()/df_pa['True'].sum()) - (df_pa.nlargest(k1, 'Reported')['Reported'].sum()/df_pa['Reported'].sum())
-
-            results.append({
-                'Beta': beta, 'Sigma': snu,
-                'log_add_1pct': la_1, 'log_add_01pct': la_01,
-                'par_mult_1pct': pm_1, 'par_add_1pct': pa_1,
-                'alpha_mult': am, 'alpha_add': aa
-            })
-    pd.DataFrame(results).to_csv("data_robustness_pareto_add.csv", index=False)
-    print("\nPareto/Additive Robustness data saved.")
-
-# =============================================================================
-# 4. EXTREME DIAGNOSTICS
-# =============================================================================
-# =============================================================================
-# 4. EXTREME DIAGNOSTICS (BIMODAL / BETA)
-# =============================================================================
-def compute_extreme_diagnostics(n_agents=2000000):
-    print("--- COMPUTING EXTREME DIAGNOSTICS ---")
-    
-    # You can change Beta to 2.5 here if you want to test the "Wealthy Ghost" economy,
-    # or keep it at 0.05 with Sigma 8.0 for the "Coin Flip" economy.
-    BETA, SIGMA_NU, T_MEAN, T_SHARE = .05, 4.5, 65000, 0.20
-    
-    low, high, cal_sigma = 0.1, 8.0, 1.0
-    for i in range(25):
-        guess = (low + high) / 2
-        np.random.seed(1234) 
+        # k is the number of agents in the top p percent of our sample
+        k = max(int(n_agents_sample * (p/100)), 1)
         
-        # 1. Explicitly create the temporary array
-        yt_temp = np.random.lognormal(np.log(T_MEAN) - (guess**2 / 2), guess, 100000)
+        # 1. Total True and Reported Dollars (Scaled)
+        t_dollars = true_sorted[-k:].sum() * scale_factor
+        r_dollars = rep_sorted[-k:].sum() * scale_factor
         
-        # 2. Pass it to the standard function with Beta noise
-        yr_temp, _ = tm.apply_evasion(yt_temp, BETA, SIGMA_NU, noise_dist='beta', seed=42)
+        ts.append(t_dollars)
+        rs.append(r_dollars)
         
-        share = np.sort(yr_temp)[-1000:].sum() / yr_temp.sum()
-        if abs(share - T_SHARE) < 0.002: cal_sigma = guess; break
-        elif share < T_SHARE: low = guess
-        else: high = guess
-            
-    np.random.seed(42)
-    yt = np.random.lognormal(np.log(T_MEAN) - (cal_sigma**2 / 2), cal_sigma, n_agents)
+        # 2. Option A: Evasion of the TRUE Top earners
+        # Formula: (True $ - Reported $) / True $
+        evaded_by_true_top = (true_sorted[-k:].sum() - rep_of_true_top[-k:].sum())
+        es_true.append(evaded_by_true_top / true_sorted[-k:].sum())
+        
+        # 3. Option A: Evasion of the REPORTED Top earners
+        true_dollars_of_rep_top = true_of_rep_top[-k:].sum()
+        evaded_by_rep_top = true_dollars_of_rep_top - rep_sorted[-k:].sum()
+        es_rep.append(evaded_by_rep_top / true_dollars_of_rep_top)
+
+    pd.DataFrame({
+        'grid_pct': grid_pct, 
+        'true_dollars_usd': ts, 
+        'rep_dollars_usd': rs, 
+        'evasion_rate_true_top': es_true, 
+        'evasion_rate_rep_top': es_rep
+    }).to_csv("data_walkthrough_scaled_lines.csv", index=False)
+
+    print("Walkthrough and Line Data saved with consistent Option A definitions.")
+
+
+def calculate_parameter_intuition(gamma=0.05, sigma_nu=1.4, inc_dist='lognormal', noise_dist='beta', n_agents=5000000):
+    """
+    Calculates reporting intuition using the unified math engine.
+    Now includes the Aggregate Dollar-Weighted Gap and Dollar-Weighted Top 1% Evasion.
+    """
+    print(f"\n--- Calculating Intuition for Gamma={gamma}, Sigma={sigma_nu} ---")
+    print(f"--- Economy: {inc_dist.capitalize()} True Income / {noise_dist.capitalize()} Evasion Noise ---")
     
-    # 3. Generate the final 2-million agent economy with Beta noise
-    yr, ev = tm.apply_evasion(yt, BETA, SIGMA_NU, noise_dist='beta', seed=43)
+    # Generate entirely via unified master engine
+    y_true, y_rep, ev_rates, _ = _build_economy(gamma, sigma_nu, n_agents, inc_dist, noise_dist)
+
+    k_1pct = int(n_agents * 0.01)
+    idx_t = np.argsort(y_true)
+    idx_r = np.argsort(y_rep)
+
+    total_true = y_true.sum()
+    total_rep = y_rep.sum()
+
+    # 1. Calculate the Aggregate Dollar-Weighted Gap
+    aggregate_gap = 1.0 - (total_rep / total_true)
+
+    # 2. Dollar-Weighted Evasion of the True Top 1%
+    true_top1_idx = idx_t[-k_1pct:]
+    top1_true_dollars = y_true[true_top1_idx].sum()
+    top1_rep_dollars = y_rep[true_top1_idx].sum()
+    ev_rate_top1_weighted = 1.0 - (top1_rep_dollars / top1_true_dollars)
     
-    # --- Exact Lines Math ---
-    grid = np.logspace(0, -2, 50)
-    idx_r, idx_t = np.argsort(yr), np.argsort(yt)
-    tsort, rsort = np.sort(yt), yr[idx_r]
-    ev_by_rep, ev_by_true = ev[idx_r], ev[idx_t]
+    # 3. Calculate Unweighted Reporting Rates (for reference)
+    rep_rates = 1 - ev_rates
+    avg_rep_all = rep_rates.mean()
     
-    ts, rs, es_rep, es_true = [], [], [], []
-    for p in grid:
-        k = max(int(n_agents * (p/100)), 10)
-        ts.append(tsort[-k:].sum() / tsort.sum())
-        rs.append(rsort[-k:].sum() / rsort.sum())
-        es_rep.append(ev_by_rep[-k:].mean())
-        es_true.append(ev_by_true[-k:].mean())
+    # Calculate Top 1% Shares for the Decomposition
+    s_y = y_true[idx_t[-k_1pct:]].sum() / total_true
+    s_r = y_rep[idx_r[-k_1pct:]].sum() / total_rep
+    s_y_given_r = y_true[idx_r[-k_1pct:]].sum() / total_true
 
-    pd.DataFrame({'grid': grid, 'ts': ts, 'rs': rs, 'es_rep': es_rep, 'es_true': es_true}).to_csv("data_extreme_lines.csv", index=False)
+    # The Core Decomposition
+    selection_effect = s_y_given_r - s_y
+    diff_evasion_effect = s_r - s_y_given_r
+    total_gap = s_r - s_y
     
-    # --- KDE Sample ---
-    pd.DataFrame({'True': yt, 'Reported': yr, 'EvasionRate': ev}).sample(20000, random_state=42).to_csv("data_extreme_kde.csv", index=False)
-    print("Extreme Diagnostics data saved.")
-
-# =============================================================================
-# 5. FIXED ROBUSTNESS (TRUE & AGGREGATE)
-# =============================================================================
-def compute_fixed_robustness(n_agents=2000000):
-    print("--- COMPUTING FIXED TRUE & FIXED AGGREGATE ROBUSTNESS ---")
-    results = []
-    TARGET_AGG_EV = 0.08
-    baseline_sigma = tm.solve_for_reported_share('lognormal', 0.0, 0.0, 'loglinear', 'log_income', 0.20, n_agents)
-    y_true_fixed = tm.generate_true_income(n_agents, 'lognormal', baseline_sigma, seed=2026)
-    k1 = int(n_agents * 0.01)
-    true_share_fixed = np.sort(y_true_fixed)[-k1:].sum() / y_true_fixed.sum()
+    print("-" * 55)
+    print(f"Aggregate Dollar-Weighted Gap:            {aggregate_gap:.1%}  <-- Matches Total Gap Heatmap")
+    print(f"Dollar-Weighted Evasion (True Top 1%):    {ev_rate_top1_weighted:.1%}  <-- Matches Top 1% Heatmap")
+    print(f"Unweighted Average Reporting Rate:        {avg_rep_all:.1%}")
     
-    for beta in BETA_VALS:
-        for snu in SIGMA_VALS:
-            print(f"  Simulating Fixed Robustness: Beta={beta:.2f}, Sigma={snu:.1f}...", end="\r")
-            
-            y_rep_ft, _ = tm.apply_evasion(y_true_fixed, beta=beta, sigma_nu=snu, mode='loglinear', z_type='log_income', seed=999)
-            rep_share_ft = np.sort(y_rep_ft)[-k1:].sum() / y_rep_ft.sum()
-            
-            best_eb = tm.solve_for_base_evasion(y_true_fixed, beta, snu, target_evasion=TARGET_AGG_EV, mode='loglinear', z_type='log_income')
-            y_rep_fa, _ = tm.apply_evasion(y_true_fixed, beta, snu, mode='loglinear', base_evasion=best_eb, seed=999)
-            
-            results.append({
-                'Beta': beta, 'Sigma': snu,
-                'fixed_true_rep_share': rep_share_ft,
-                'fixed_true_gap': true_share_fixed - rep_share_ft,
-                'fixed_agg_ebase': best_eb,
-                'fixed_agg_taxgap': (y_true_fixed.sum() - y_rep_fa.sum()) / y_true_fixed.sum(),
-                'fixed_agg_repgap': true_share_fixed - (np.sort(y_rep_fa)[-k1:].sum() / y_rep_fa.sum())
-            })
-    pd.DataFrame(results).to_csv("data_fixed_robustness.csv", index=False)
-    print("\nFixed Robustness data saved.")
+    print("-" * 55)
+    print("THE DECOMPOSITION OF THE REPORTED GAP (S_R - S_Y):")
+    print(f"  True Share of True Top 1% (S_Y):         {s_y:.4f}")
+    print(f"  Reported Share of Reported Top 1% (S_R): {s_r:.4f}")
+    print(f"  True Share of Reported Top 1% (S_Y|R):   {s_y_given_r:.4f}")
+    print("-" * 55)
+    print(f"  1. Selection Effect (S_Y|R - S_Y):       {selection_effect:+.4f}  <-- Pulls reported share DOWN")
+    print(f"  2. Differential Evasion (S_R - S_Y|R):   {diff_evasion_effect:+.4f}  <-- Pulls reported share UP")
+    print(f"  =======================================================")
+    print(f"  Net Reported Gap (S_R - S_Y):            {total_gap:+.4f}")
+    print("-" * 55)
 
+    # Memory hygiene
+    del y_true, y_rep, ev_rates
 # =============================================================================
-# 6. BIMODAL ROBUSTNESS
 # =============================================================================
-def compute_bimodal_robustness(n_agents=2000000):
-    print("--- COMPUTING BIMODAL ROBUSTNESS ---")
-    results = []
-    target_beta, target_snu = 0.05, 1.4
-    
-    for beta in BETA_VALS:
-        for snu in SIGMA_VALS:
-            print(f"  Bimodal Cell: Beta={beta:.2f}, Sigma={snu:.1f}...", end="\r")
-            df, _ = tm.get_calibrated_scenario('lognormal', beta=beta, sigma_nu=snu, mode='loglinear', n_agents=n_agents, noise_dist='beta')
-            
-            k = int(n_agents * 0.01)
-            t1 = df.nlargest(k, 'True')['True'].sum() / df['True'].sum()
-            r1 = df.nlargest(k, 'Reported')['Reported'].sum() / df['Reported'].sum()
-            top1 = df.nlargest(k, 'True')
-            
-            alpha_val, beta_param = np.nan, np.nan
-            if snu > 0:
-                log_y = np.log(df['True'])
-                avg_ev = np.clip(0.12 * np.exp(beta * ((log_y - log_y.mean()) / log_y.std())), 1e-5, 0.95)
-                alpha_val = (avg_ev / snu).mean()
-                beta_param = ((1.0 - avg_ev) / snu).mean()
-            
-            results.append({
-                'Beta': beta, 'Sigma': snu,
-                'res_map': t1 - r1,
-                'rate_1pct_map': (top1['True'] - top1['Reported']).sum() / top1['True'].sum(),
-                'agg_ev_map': (df['True'].sum() - df['Reported'].sum()) / df['True'].sum(),
-                'alpha_map': alpha_val, 'beta_param_map': beta_param
-            })
-            
-            if np.isclose(beta, target_beta) and np.isclose(snu, target_snu):
-                # 1. Exact Lines
-                grid = np.logspace(0, -2, 50)
-                idx_r, idx_t = np.argsort(df['Reported'].values), np.argsort(df['True'].values)
-                tsort, rsort = np.sort(df['True'].values), df['Reported'].values[idx_r]
-                ev_by_rep, ev_by_true = df['EvasionRate'].values[idx_r], df['EvasionRate'].values[idx_t]
-                
-                lines_data = []
-                for p in grid:
-                    k_val = max(int(n_agents * (p/100)), 100)
-                    lines_data.append({
-                        'grid_pct': p,
-                        'true_share': tsort[-k_val:].sum() / tsort.sum(),
-                        'rep_share': rsort[-k_val:].sum() / rsort.sum(),
-                        'ev_rep': ev_by_rep[-k_val:].mean(),
-                        'ev_true': ev_by_true[-k_val:].mean()
-                    })
-                pd.DataFrame(lines_data).to_csv("data_bimodal_lines.csv", index=False)
-                
-                # 2. KDE Sample
-                df.sample(20000, random_state=42).to_csv("data_bimodal_kde.csv", index=False)
-                
-    pd.DataFrame(results).to_csv("data_bimodal_grid.csv", index=False)
-    print("\nBimodal data saved.")
-
-# =============================================================================
-# 7. EQUALITY LINES
-# =============================================================================
-def compute_equality_lines(n_agents=2000000):
-    print("--- COMPUTING EQUALITY LINES ---")
-    from scipy import optimize
-    
-    def get_reported_share(sigma_ineq, beta, sigma_nu, noise_dist):
-        y_true = tm.generate_true_income(n_agents, 'lognormal', sigma_ineq, seed=42)
-        y_rep, _ = tm.apply_evasion(y_true, beta, sigma_nu, mode='loglinear', noise_dist=noise_dist, seed=43)
-        k = int(n_agents * 0.01)
-        return (np.sort(y_rep)[-k:].sum() / y_rep.sum()) - 0.20
-
-    def get_true_share_gap(beta, sigma_nu, noise_dist):
-        calib_sigma = optimize.brentq(get_reported_share, 0.5, 3.5, args=(beta, sigma_nu, noise_dist))
-        y_true = tm.generate_true_income(n_agents, 'lognormal', calib_sigma, seed=42)
-        k = int(n_agents * 0.01)
-        return (np.sort(y_true)[-k:].sum() / y_true.sum()) - 0.20
-
-    sigma_nu_values = np.linspace(0, 1.6, 30)
-    results = []
-
-    for snu in sigma_nu_values:
-        print(f"  Solving Equality Line for Sigma_Nu = {snu:.2f}...", end="\r")
-        try: root_norm = optimize.brentq(get_true_share_gap, -0.10, 0.80, args=(snu, 'normal'))
-        except ValueError: root_norm = np.nan
-        try: root_beta = optimize.brentq(get_true_share_gap, -0.10, 0.80, args=(snu, 'beta'))
-        except ValueError: root_beta = np.nan
-        results.append({'sigma_nu': snu, 'beta_normal': root_norm, 'beta_bimodal': root_beta})
-
-    pd.DataFrame(results).to_csv("data_equality_lines.csv", index=False)
-    print("\nEquality Lines data saved.")
-
-# =============================================================================
-# MAIN EXECUTION
+# EXECUTION BLOCK
 # =============================================================================
 if __name__ == "__main__":
-    N_AGENTS = 2000000 
+    import time
+    start_time = time.time()
+
+    print("--- tax_model.py Execution: Full Production ---")
+
+    # 1. PARAMETER INTUITION (Theoretical Foundation)
+    # Explains reporting behavior for Step 3: Gamma=0.05, Sigma=1.4.
+    #calculate_parameter_intuition(
+    #    gamma=0.05, 
+    #    sigma_nu=1.4, 
+    #    inc_dist='lognormal', 
+    #    noise_dist='beta', 
+    #    n_agents=5000000
+    #)
+
+    # 2. SCALED WALKTHROUGH (Main Figures)
+    # Generates totals for 330M population and Option A line curves.
+    #compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_dist='lognormal', noise_dist='beta')
+
+    # 3. BASELINE GRID (Table 1)
+    # A smaller, high-precision run for the main text tables.
+    #compute_core_grid(n_agents=5000000)
+
+    # 4. FULL 2x2 ROBUSTNESS GRIDS (Production Heatmaps)
+    # Covers the full matrix: (Lognormal/Pareto) x (Beta/Normal).
+    # We use 10M agents for each to ensure stability in the extreme tails.
     
-    #compute_core_grid(n_agents=N_AGENTS)
-    #compute_walkthrough(n_agents=N_AGENTS)
-    #compute_robustness_grid(n_agents=N_AGENTS)
-    compute_extreme_diagnostics(n_agents=N_AGENTS)
-    #compute_fixed_robustness(n_agents=N_AGENTS)
-    #compute_bimodal_robustness(n_agents=N_AGENTS)
-    #compute_equality_lines(n_agents=N_AGENTS)
+    # Quadrant 1: Lognormal Income / Beta Evasion Noise
+    #compute_robustness_grid(inc_dist='lognormal', noise_dist='beta', n_agents=10000000)
     
-    print("\n=== ALL DATA COMPUTATION COMPLETE ===")
+    # Quadrant 2: Lognormal Income / Normal Evasion Noise
+    #compute_robustness_grid(inc_dist='lognormal', noise_dist='normal', n_agents=10000000)
+    
+    # Quadrant 3: Pareto Income / Beta Evasion Noise
+    #compute_robustness_grid(inc_dist='pareto', noise_dist='beta', n_agents=10000000)
+    
+    # Quadrant 4: Pareto Income / Normal Evasion Noise
+    #compute_robustness_grid(inc_dist='pareto', noise_dist='normal', n_agents=10000000)
+    
+    # --- NEW FIXED-THETA RUNS ---
+    print("\n--- RUNNING FIXED-THETA ROBUSTNESS GRIDS ---")
+    
+    # 1. Beta Noise Runs (You already have these CSVs, you can comment them out if you want to save time)
+    # compute_robustness_grid_fixed(inc_dist='lognormal', noise_dist='beta', n_agents=10000000)
+    # compute_robustness_grid_fixed(inc_dist='pareto', noise_dist='beta', n_agents=10000000)
+
+    # 2. Normal (Log-Linear) Noise Runs (These are the ones missing)
+    compute_robustness_grid_fixed(inc_dist='lognormal', noise_dist='normal', n_agents=10000000)
+    compute_robustness_grid_fixed(inc_dist='pareto', noise_dist='normal', n_agents=10000000)
+
+
+    elapsed = time.time() - start_time
+    print(f"\n--- Total Execution Time: {elapsed/60:.2f} minutes ---")
