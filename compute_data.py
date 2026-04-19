@@ -256,6 +256,7 @@ def compute_core_grid(n_agents=1000000):
 def compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_dist='lognormal', noise_dist='beta'):
     """
     Computes scaled walkthrough data and Option A line-chart curves.
+    Generates KDE data and Cutoff statistics required for Panel A plotting.
     Uses a RAM-safe sample and scales aggregates to the full US population.
     """
     scale_factor = n_target_pop / n_agents_sample 
@@ -263,7 +264,7 @@ def compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_di
     print(f"--- COMPUTING SCALED WALKTHROUGH (Option A Consistent) ---")
     print(f"Scaling factor: {scale_factor:.1f}x ({n_target_pop:,} target)")
 
-    BETA, SIGMA_NU = 0.05, 1.4
+    BETA, SIGMA_NU = 0.0, 0.0
     steps = [
         ("1. Baseline", 0.00, 0.0),
         ("2. Add Progressivity", BETA, 0.0),
@@ -271,11 +272,9 @@ def compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_di
     ]
 
     stats_list = []
-    # Placeholders for the final step data used in line charts
     final_y_true, final_y_rep, final_idx_t, final_idx_r = None, None, None, None
 
     for step_name, b, snu in steps:
-        # Generate via unified engine
         y_true, y_rep, _, _ = _build_economy(
             b, snu, n_agents_sample, inc_dist, noise_dist
         )
@@ -283,31 +282,50 @@ def compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_di
         total_true = y_true.sum()
         total_rep = y_rep.sum()
         
-        # Consistent Tax Gap definition
+        # Calculate cutoffs for the 1% 
+        k1 = int(n_agents_sample * 0.01)
+        idx_t_temp = np.argsort(y_true)
+        idx_r_temp = np.argsort(y_rep)
+        
+        cutoff_true = y_true[idx_t_temp[-k1]]
+        cutoff_rep = y_rep[idx_r_temp[-k1]]
+
         stats_list.append({
             'Step': step_name,
+            'Beta': b,
+            'Sigma': snu,
             'Total_True_USD': total_true * scale_factor,
             'Total_Reported_USD': total_rep * scale_factor,
-            'Tax_Gap': (total_true - total_rep) / total_true
+            'Tax_Gap': (total_true - total_rep) / total_true,
+            'Cutoff_True': cutoff_true,
+            'Cutoff_Rep': cutoff_rep,
+            'TargetMean': TARGET_MEAN
         })
 
-        # Capture the "Step 3" arrays for the line chart logic
         if step_name == "3. Add Heterogeneity":
             final_y_true = y_true
             final_y_rep = y_rep
-            final_idx_t = np.argsort(y_true)
-            final_idx_r = np.argsort(y_rep)
+            final_idx_t = idx_t_temp
+            final_idx_r = idx_r_temp
         else:
-            del y_true, y_rep # Save RAM on intermediate steps
+            del y_true, y_rep 
 
-    # Save the 3-step table
     pd.DataFrame(stats_list).to_csv("data_walkthrough_scaled_stats.csv", index=False)
 
-    # --- OPTION A LINE CHART LOGIC ---
+    # --- PANEL A KDE EXPORT ---
+    print("Exporting KDE Sample for Panel A...")
+    # Sample 500k to prevent massive CSV files while maintaining smooth KDEs
+    np.random.seed(42)
+    sample_indices = np.random.choice(n_agents_sample, min(500000, n_agents_sample), replace=False)
+    pd.DataFrame({
+        'True': final_y_true[sample_indices],
+        'Reported': final_y_rep[sample_indices]
+    }).to_csv("data_walkthrough_kde.csv", index=False)
+
+    # --- PANEL B LINE CHART LOGIC ---
     print("Computing Dollar-Weighted Evasion Curves...")
-    grid_pct = np.logspace(0, -2, 100) # From Top 1% down to Top 0.01%
+    grid_pct = np.logspace(0, -2, 100) 
     
-    # Pre-sort for efficiency
     true_sorted = final_y_true[final_idx_t]
     rep_sorted = final_y_rep[final_idx_r]
     rep_of_true_top = final_y_rep[final_idx_t]
@@ -316,22 +334,16 @@ def compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_di
     ts, rs, es_rep, es_true = [], [], [], []
     
     for p in grid_pct:
-        # k is the number of agents in the top p percent of our sample
         k = max(int(n_agents_sample * (p/100)), 1)
         
-        # 1. Total True and Reported Dollars (Scaled)
         t_dollars = true_sorted[-k:].sum() * scale_factor
         r_dollars = rep_sorted[-k:].sum() * scale_factor
-        
         ts.append(t_dollars)
         rs.append(r_dollars)
         
-        # 2. Option A: Evasion of the TRUE Top earners
-        # Formula: (True $ - Reported $) / True $
         evaded_by_true_top = (true_sorted[-k:].sum() - rep_of_true_top[-k:].sum())
         es_true.append(evaded_by_true_top / true_sorted[-k:].sum())
         
-        # 3. Option A: Evasion of the REPORTED Top earners
         true_dollars_of_rep_top = true_of_rep_top[-k:].sum()
         evaded_by_rep_top = true_dollars_of_rep_top - rep_sorted[-k:].sum()
         es_rep.append(evaded_by_rep_top / true_dollars_of_rep_top)
@@ -344,8 +356,7 @@ def compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_di
         'evasion_rate_rep_top': es_rep
     }).to_csv("data_walkthrough_scaled_lines.csv", index=False)
 
-    print("Walkthrough and Line Data saved with consistent Option A definitions.")
-
+    print("Walkthrough and Line Data saved.")
 
 def calculate_parameter_intuition(gamma=0.05, sigma_nu=1.4, inc_dist='lognormal', noise_dist='beta', n_agents=5000000):
     """
@@ -429,7 +440,7 @@ if __name__ == "__main__":
 
     # 2. SCALED WALKTHROUGH (Main Figures)
     # Generates totals for 330M population and Option A line curves.
-    #compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_dist='lognormal', noise_dist='beta')
+    compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_dist='lognormal', noise_dist='beta')
 
     # 3. BASELINE GRID (Table 1)
     # A smaller, high-precision run for the main text tables.
@@ -459,8 +470,8 @@ if __name__ == "__main__":
     # compute_robustness_grid_fixed(inc_dist='pareto', noise_dist='beta', n_agents=10000000)
 
     # 2. Normal (Log-Linear) Noise Runs (These are the ones missing)
-    compute_robustness_grid_fixed(inc_dist='lognormal', noise_dist='normal', n_agents=10000000)
-    compute_robustness_grid_fixed(inc_dist='pareto', noise_dist='normal', n_agents=10000000)
+    #compute_robustness_grid_fixed(inc_dist='lognormal', noise_dist='normal', n_agents=10000000)
+    #compute_robustness_grid_fixed(inc_dist='pareto', noise_dist='normal', n_agents=10000000)
 
 
     elapsed = time.time() - start_time
