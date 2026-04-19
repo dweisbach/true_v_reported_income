@@ -109,164 +109,111 @@ def plot_table1():
 
 def plot_walkthrough():
     print("Plotting Walkthrough Figure...")
+    
+    # --- Load scenario metadata ---
     try:
-        df_kde = pd.read_csv("data_walkthrough_kde.csv")
-        df_lines = pd.read_csv("data_walkthrough_lines.csv")
-        stats = pd.read_csv("data_walkthrough_stats.csv").iloc[0]
+        df_scenarios = pd.read_csv("data_walkthrough_scenarios.csv")
     except FileNotFoundError:
-        print("Error: Walkthrough data files not found. Run compute_walkthrough first.")
+        print("Error: data_walkthrough_scenarios.csv not found. Run compute_walkthrough first.")
         return
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-
-    # --- PANEL A: DISTRIBUTIONS & CUTOFFS ---
-    sns.kdeplot(x=np.log(df_kde['True']), ax=ax1, color='tab:red', lw=2, label='True')
-    sns.kdeplot(x=np.log(df_kde['Reported']), ax=ax1, color='tab:blue', lw=2, ls='--', label='Reported')
     
-    # Unreported People Density
-    unreported = np.maximum(df_kde['True'] - df_kde['Reported'], 1)
-    sns.kdeplot(x=np.log(unreported), ax=ax1, color='purple', lw=2, ls=':', label='Unreported Amount')
-
-    # Vertical Cutoff Lines
-    ax1.axvline(np.log(stats['Cutoff_True']), color='gray', alpha=0.6, lw=1.5)
-    ax1.axvline(np.log(stats['Cutoff_Rep']), color='gray', alpha=0.6, lw=1.5, ls='--')
+    n_rows = len(df_scenarios)
+    fig, axes = plt.subplots(n_rows, 2, figsize=(14, 6 * n_rows))
     
-    # Mean Income Line & Box
-    mean_val = stats['TargetMean']
-    ax1.axvline(np.log(mean_val), color='k', alpha=0.4)
-    ax1.text(np.log(mean_val) - 0.2, 0.10, f"Mean Income:\n${mean_val:,.0f}", 
-             fontsize=9, ha='right', va='center', 
-             bbox=dict(boxstyle="round", facecolor='white', alpha=0.9))
-
-    # Top 1% Summary Box (Shifted to 0.98 to avoid Mean Line)
-    # Using 'T' for Trillion assuming ~100M agents. Use 'Q' if 100B.
-    txt_box = (f"Top 1% Cutoff:\n"
-               f"True: ${stats['Cutoff_True']:,.0f}\n"
-               f"Reported: ${stats['Cutoff_Rep']:,.0f}\n"
-               f"Gap: ${stats['Cutoff_Rep'] - stats['Cutoff_True']:,.0f}\n"
-               f"----------\n"
-               f"Total True: ${stats['Total_True']/1e12:.2f}T\n"
-               f"Total Rep: ${stats['Total_Rep']/1e12:.2f}T\n"
-               f"Relative Income Gap: {stats['Tax_Gap']:.1%}")
+    # Handle single-row case (axes shape is (2,) not (1,2))
+    if n_rows == 1:
+        axes = axes[np.newaxis, :]
     
-    ax1.text(0.98, 0.95, txt_box, transform=ax1.transAxes, fontsize=10, 
-             ha='right', va='top', bbox=dict(boxstyle="round", facecolor='white', alpha=0.9))
+    for row, (_, scenario) in enumerate(df_scenarios.iterrows()):
+        idx = int(scenario['idx'])
+        label = scenario['Label']
+        
+        try:
+            df_kde = pd.read_csv(f"data_walkthrough_kde_{idx}.csv")
+            df_lines = pd.read_csv(f"data_walkthrough_scaled_lines_{idx}.csv")
+            stats = pd.read_csv(f"data_walkthrough_panel_stats_{idx}.csv").iloc[0]
+        except FileNotFoundError:
+            print(f"  [Warning] Missing data for scenario {idx} ({label}). Skipping row.")
+            continue
+        
+        ax1, ax2 = axes[row, 0], axes[row, 1]
+        
+        # --- PANEL A: DISTRIBUTIONS & CUTOFFS ---
+        sns.kdeplot(x=np.log(df_kde['True']), ax=ax1, color='tab:red', lw=2, label='True')
+        sns.kdeplot(x=np.log(df_kde['Reported']), ax=ax1, color='tab:blue', lw=2, ls='--', label='Reported')
+        
+        unreported = np.maximum(df_kde['True'] - df_kde['Reported'], 1)
+        sns.kdeplot(x=np.log(unreported), ax=ax1, color='purple', lw=2, ls=':', label='Unreported Amount')
 
-    ax1.set_xlabel("Log Income")
-    ax1.set_ylabel("Density")
-    ax1.set_title("A. Distributions & Cutoffs")
-    ax1.legend(loc='center left', bbox_to_anchor=(0.25, 0.8))
+        ax1.axvline(np.log(stats['Cutoff_True']), color='gray', alpha=0.6, lw=1.5)
+        ax1.axvline(np.log(stats['Cutoff_Rep']), color='gray', alpha=0.6, lw=1.5, ls='--')
+        
+        mean_val = stats['TargetMean']
+        ax1.axvline(np.log(mean_val), color='k', alpha=0.4)
+        ax1.text(np.log(mean_val) - 0.2, 0.10, f"Mean Income:\n${mean_val:,.0f}", 
+                 fontsize=9, ha='right', va='center', 
+                 bbox=dict(boxstyle="round", facecolor='white', alpha=0.9))
 
-    # --- PANEL B: TOP SHARES & INTENSITY ---
-    ax2.plot(df_lines['grid_pct'], df_lines['ts'], color='tab:red', lw=2, label='True Share')
-    ax2.plot(df_lines['grid_pct'], df_lines['rs'], color='tab:blue', lw=2, ls='--', label='Reported Share')
-    ax2.set_xscale('log')
-    ax2.invert_xaxis()
-    ax2.set_xticks([1, 0.1, 0.01])
-    ax2.set_xticklabels(['1%', '0.1%', '0.01%'])
-    ax2.set_xlabel("Top Percentile")
-    ax2.set_ylabel("Cumulative Income Share")
+        txt_box = (f"Top 1% Cutoff:\n"
+                   f"True: ${stats['Cutoff_True']:,.0f}\n"
+                   f"Reported: ${stats['Cutoff_Rep']:,.0f}\n"
+                   f"Gap: $ {stats['Cutoff_True'] - stats['Cutoff_Rep']:,.0f}\n"
+                   f"----------\n"
+                   f"Total True: ${stats['Total_True']/1e12:.2f}T\n"
+                   f"Total Rep: ${stats['Total_Rep']/1e12:.2f}T\n"
+                   f"Relative Income Gap: {stats['Tax_Gap']:.1%}")
+        
+        ax1.text(0.98, 0.95, txt_box, transform=ax1.transAxes, fontsize=10, 
+                 ha='right', va='top', bbox=dict(boxstyle="round", facecolor='white', alpha=0.9))
 
-    ax2t = ax2.twinx()
-    ax2t.plot(df_lines['grid_pct'], df_lines['es_rep'], color='darkgreen', lw=2, ls=':', label='Avg Evasion (Rep Top %)')
-    ax2t.plot(df_lines['grid_pct'], df_lines['es_true'], color='darkgreen', lw=2, ls='-.', alpha=0.7, label='Avg Evasion (True Top %)')
-    
-    ax2t.set_ylabel("Average Evasion Rate", color='darkgreen')
-    ax2t.set_ylim(0, 0.25) # Anchored to your modest gamma
-    ax2t.tick_params(axis='y', labelcolor='darkgreen')
+        ax1.set_xlabel("Log Income")
+        ax1.set_ylabel("Density")
+        ax1.set_title(f"{label}: Distributions & Cutoffs")
+        if row == 0:
+            ax1.legend(loc='upper left')
 
-    # Unified Legend for Panel B
-    lines, labels = ax2.get_legend_handles_labels()
-    lines2, labels2 = ax2t.get_legend_handles_labels()
-    ax2.legend(lines + lines2, labels + labels2, loc='upper right', fontsize=9)
-    ax2.set_title("B. Top Shares & Evasion Intensity")
+        # --- PANEL B: TOP SHARES & INTENSITY ---
+        true_shares = df_lines['true_dollars_usd'] / stats['Total_True']
+        rep_shares = df_lines['rep_dollars_usd'] / stats['Total_Rep']
+
+        ax2.plot(df_lines['grid_pct'], true_shares, color='tab:red', lw=2, label='True Share')
+        ax2.plot(df_lines['grid_pct'], rep_shares, color='tab:blue', lw=2, ls='--', label='Reported Share')
+        ax2.set_xscale('log')
+        ax2.invert_xaxis()
+        ax2.set_xticks([1, 0.1, 0.01])
+        ax2.set_xticklabels(['1%', '0.1%', '0.01%'])
+        ax2.set_xlabel("Top Percentile")
+        ax2.set_ylabel("Cumulative Income Share")
+
+        ax2t = ax2.twinx()
+        ax2t.plot(df_lines['grid_pct'], df_lines['evasion_rate_rep_top'], color='darkgreen', lw=2, ls=':', label='Avg Evasion (Rep Top %)')
+        ax2t.plot(df_lines['grid_pct'], df_lines['evasion_rate_true_top'], color='darkgreen', lw=2, ls='-.', alpha=0.7, label='Avg Evasion (True Top %)')
+        
+        ax2t.set_ylabel("Average Evasion Rate", color='darkgreen')
+        ax2t.set_ylim(0, 0.25)
+        ax2t.tick_params(axis='y', labelcolor='darkgreen')
+
+        lines, labels_l = ax2.get_legend_handles_labels()
+        lines2, labels2 = ax2t.get_legend_handles_labels()
+        if row == 0:
+            ax2.legend(lines + lines2, labels_l + labels2, loc='upper right', fontsize=9)
+        ax2.set_title(f"{label}: Top Shares & Evasion Intensity")
+
+    # Conform axes across all left-column (KDE) panels
+    left_axes = [axes[r, 0] for r in range(n_rows)]
+    all_xlims = [ax.get_xlim() for ax in left_axes]
+    all_ylims = [ax.get_ylim() for ax in left_axes]
+    shared_xlim = (max(x[0] for x in all_xlims), max(x[1] for x in all_xlims))
+    shared_ylim = (0, 0.35)
+    for ax in left_axes:
+        ax.set_xlim(shared_xlim)
+        ax.set_ylim(shared_ylim)
 
     plt.tight_layout()
     plt.savefig("Fig_Walkthrough_Clean.pdf")
     print("Walkthrough figure saved.")    
 
 
-
-def plot_walkthrough():
-    print("Plotting Walkthrough Figure...")
-    try:
-        df_kde = pd.read_csv("data_walkthrough_kde.csv")
-        df_lines = pd.read_csv("data_walkthrough_scaled_lines.csv")
-        stats = pd.read_csv("data_walkthrough_scaled_stats.csv").iloc[-1]
-    except FileNotFoundError:
-        print("Error: Walkthrough data files not found. Run compute_walkthrough first.")
-        return
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-
-    # --- PANEL A: DISTRIBUTIONS & CUTOFFS ---
-    sns.kdeplot(x=np.log(df_kde['True']), ax=ax1, color='tab:red', lw=2, label='True')
-    sns.kdeplot(x=np.log(df_kde['Reported']), ax=ax1, color='tab:blue', lw=2, ls='--', label='Reported')
-    
-    # Unreported People Density
-    unreported = np.maximum(df_kde['True'] - df_kde['Reported'], 1)
-    sns.kdeplot(x=np.log(unreported), ax=ax1, color='purple', lw=2, ls=':', label='Unreported Amount')
-
-    # Vertical Cutoff Lines
-    ax1.axvline(np.log(stats['Cutoff_True']), color='gray', alpha=0.6, lw=1.5)
-    ax1.axvline(np.log(stats['Cutoff_Rep']), color='gray', alpha=0.6, lw=1.5, ls='--')
-    
-    # Mean Income Line & Box
-    mean_val = stats['TargetMean']
-    ax1.axvline(np.log(mean_val), color='k', alpha=0.4)
-    ax1.text(np.log(mean_val) - 0.2, 0.10, f"Mean Income:\n${mean_val:,.0f}", 
-             fontsize=9, ha='right', va='center', 
-             bbox=dict(boxstyle="round", facecolor='white', alpha=0.9))
-
-    # Top 1% Summary Box 
-    txt_box = (f"Top 1% Cutoff:\n"
-               f"True: ${stats['Cutoff_True']:,.0f}\n"
-               f"Reported: ${stats['Cutoff_Rep']:,.0f}\n"
-               f"Gap: ${stats['Cutoff_Rep'] - stats['Cutoff_True']:,.0f}\n"
-               f"----------\n"
-               f"Total True: ${stats['Total_True_USD']/1e12:.2f}T\n"
-               f"Total Rep: ${stats['Total_Reported_USD']/1e12:.2f}T\n"
-               f"Relative Income Gap: {stats['Tax_Gap']:.1%}")
-    
-    ax1.text(0.98, 0.95, txt_box, transform=ax1.transAxes, fontsize=10, 
-             ha='right', va='top', bbox=dict(boxstyle="round", facecolor='white', alpha=0.9))
-
-    ax1.set_xlabel("Log Income")
-    ax1.set_ylabel("Density")
-    ax1.set_title("A. Distributions & Cutoffs")
-    ax1.legend(loc='center left', bbox_to_anchor=(0.25, 0.8))
-
-    # --- PANEL B: TOP SHARES & INTENSITY ---
-    # Convert absolute dollars to income shares using the totals from Panel A stats
-    true_share = df_lines['true_dollars_usd'] / stats['Total_True_USD']
-    rep_share = df_lines['rep_dollars_usd'] / stats['Total_Reported_USD']
-
-    ax2.plot(df_lines['grid_pct'], true_share, color='tab:red', lw=2, label='True Share')
-    ax2.plot(df_lines['grid_pct'], rep_share, color='tab:blue', lw=2, ls='--', label='Reported Share')
-    ax2.set_xscale('log')
-    ax2.invert_xaxis()
-    ax2.set_xticks([1, 0.1, 0.01])
-    ax2.set_xticklabels(['1%', '0.1%', '0.01%'])
-    ax2.set_xlabel("Top Percentile")
-    ax2.set_ylabel("Cumulative Income Share")
-
-    ax2t = ax2.twinx()
-    ax2t.plot(df_lines['grid_pct'], df_lines['evasion_rate_rep_top'], color='darkgreen', lw=2, ls=':', label='Avg Evasion (Rep Top %)')
-    ax2t.plot(df_lines['grid_pct'], df_lines['evasion_rate_true_top'], color='darkgreen', lw=2, ls='-.', alpha=0.7, label='Avg Evasion (True Top %)')
-    
-    ax2t.set_ylabel("Average Evasion Rate", color='darkgreen')
-    ax2t.set_ylim(0, 0.25) 
-    ax2t.tick_params(axis='y', labelcolor='darkgreen')
-
-    # Unified Legend for Panel B
-    lines, labels = ax2.get_legend_handles_labels()
-    lines2, labels2 = ax2t.get_legend_handles_labels()
-    ax2.legend(lines + lines2, labels + labels2, loc='upper right', fontsize=9)
-    ax2.set_title("B. Top Shares & Evasion Intensity")
-
-    plt.tight_layout()
-    plt.savefig("Fig_Walkthrough_Clean.pdf")
-    print("Walkthrough figure saved.")
 
 
 

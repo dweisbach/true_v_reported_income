@@ -22,6 +22,8 @@ warnings.filterwarnings("ignore")
 # =============================================================================
 TARGET_MEAN = 65000
 BASE_EVASION = 0.10  # Matches empirical aggregate tax gap
+WALKTHROUGH_BETA = 0.05
+WALKTHROUGH_SIGMA = 1.4
 BETA_VALS = np.round(np.arange(-0.10, 0.31, 0.05), 2)
 SIGMA_VALS = np.round(np.arange(0.0, 3.1, 0.2), 1)
 
@@ -253,110 +255,111 @@ def compute_core_grid(n_agents=1000000):
 # =============================================================================
 # 2. WALKTHROUGH & INTUITION COMPUTATIONS
 # =============================================================================
-def compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_dist='lognormal', noise_dist='beta'):
+def compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_dist='lognormal', noise_dist='beta',
+                        scenarios=[
+       ("Baseline (no progressivity)", 0.0, 0.0),     # Row 1: heterogeneity only
+       ("Full Model", 0.05, 1.4),                     # Row 2: progressivity + heterogeneity
+   ]):
     """
     Computes scaled walkthrough data and Option A line-chart curves.
-    Generates KDE data and Cutoff statistics required for Panel A plotting.
     Uses a RAM-safe sample and scales aggregates to the full US population.
+    
+    Parameters
+    ----------
+    scenarios : list of (label, beta, sigma_nu) tuples, optional
+        Each tuple defines one row of the walkthrough figure.
+        Default: two rows — (0,0) baseline and (WALKTHROUGH_BETA, WALKTHROUGH_SIGMA).
     """
     scale_factor = n_target_pop / n_agents_sample 
     
-    print(f"--- COMPUTING SCALED WALKTHROUGH (Option A Consistent) ---")
+    if scenarios is None:
+        scenarios = [
+            ("No Evasion Heterogeneity", 0.0, 0.0),
+            ("With Evasion Heterogeneity", WALKTHROUGH_BETA, WALKTHROUGH_SIGMA)
+        ]
+    
+    print(f"--- COMPUTING SCALED WALKTHROUGH ({len(scenarios)} scenarios) ---")
     print(f"Scaling factor: {scale_factor:.1f}x ({n_target_pop:,} target)")
 
-    BETA, SIGMA_NU = 0.0, 0.0
-    steps = [
-        ("1. Baseline", 0.00, 0.0),
-        ("2. Add Progressivity", BETA, 0.0),
-        ("3. Add Heterogeneity", BETA, SIGMA_NU)
-    ]
-
-    stats_list = []
-    final_y_true, final_y_rep, final_idx_t, final_idx_r = None, None, None, None
-
-    for step_name, b, snu in steps:
+    for idx, (label, beta, sigma_nu) in enumerate(scenarios):
+        print(f"\n  Scenario {idx}: {label} (Beta={beta}, Sigma={sigma_nu})")
+        
+        # --- Build the economy ---
         y_true, y_rep, _, _ = _build_economy(
-            b, snu, n_agents_sample, inc_dist, noise_dist
+            beta, sigma_nu, n_agents_sample, inc_dist, noise_dist
         )
         
-        total_true = y_true.sum()
-        total_rep = y_rep.sum()
+        # --- KDE subsample ---
+        n_kde = min(200_000, n_agents_sample)
+        kde_idx = np.random.choice(n_agents_sample, n_kde, replace=False)
+        pd.DataFrame({
+            'True': y_true[kde_idx],
+            'Reported': y_rep[kde_idx]
+        }).to_csv(f"data_walkthrough_kde_{idx}.csv", index=False)
         
-        # Calculate cutoffs for the 1% 
+        # --- Panel A stats ---
         k1 = int(n_agents_sample * 0.01)
-        idx_t_temp = np.argsort(y_true)
-        idx_r_temp = np.argsort(y_rep)
-        
-        cutoff_true = y_true[idx_t_temp[-k1]]
-        cutoff_rep = y_rep[idx_r_temp[-k1]]
-
-        stats_list.append({
-            'Step': step_name,
-            'Beta': b,
-            'Sigma': snu,
-            'Total_True_USD': total_true * scale_factor,
-            'Total_Reported_USD': total_rep * scale_factor,
-            'Tax_Gap': (total_true - total_rep) / total_true,
+        cutoff_true = np.partition(y_true, -k1)[-k1:].min()
+        cutoff_rep = np.partition(y_rep, -k1)[-k1:].min()
+        total_true_scaled = y_true.sum() * scale_factor
+        total_rep_scaled = y_rep.sum() * scale_factor
+        tax_gap = (y_true.sum() - y_rep.sum()) / y_true.sum()
+        pd.DataFrame([{
+            'Label': label, 'Beta': beta, 'Sigma': sigma_nu,
             'Cutoff_True': cutoff_true,
             'Cutoff_Rep': cutoff_rep,
-            'TargetMean': TARGET_MEAN
-        })
-
-        if step_name == "3. Add Heterogeneity":
-            final_y_true = y_true
-            final_y_rep = y_rep
-            final_idx_t = idx_t_temp
-            final_idx_r = idx_r_temp
-        else:
-            del y_true, y_rep 
-
-    pd.DataFrame(stats_list).to_csv("data_walkthrough_scaled_stats.csv", index=False)
-
-    # --- PANEL A KDE EXPORT ---
-    print("Exporting KDE Sample for Panel A...")
-    # Sample 500k to prevent massive CSV files while maintaining smooth KDEs
-    np.random.seed(42)
-    sample_indices = np.random.choice(n_agents_sample, min(500000, n_agents_sample), replace=False)
-    pd.DataFrame({
-        'True': final_y_true[sample_indices],
-        'Reported': final_y_rep[sample_indices]
-    }).to_csv("data_walkthrough_kde.csv", index=False)
-
-    # --- PANEL B LINE CHART LOGIC ---
-    print("Computing Dollar-Weighted Evasion Curves...")
-    grid_pct = np.logspace(0, -2, 100) 
-    
-    true_sorted = final_y_true[final_idx_t]
-    rep_sorted = final_y_rep[final_idx_r]
-    rep_of_true_top = final_y_rep[final_idx_t]
-    true_of_rep_top = final_y_true[final_idx_r]
-
-    ts, rs, es_rep, es_true = [], [], [], []
-    
-    for p in grid_pct:
-        k = max(int(n_agents_sample * (p/100)), 1)
+            'TargetMean': TARGET_MEAN,
+            'Total_True': total_true_scaled,
+            'Total_Rep': total_rep_scaled,
+            'Tax_Gap': tax_gap
+        }]).to_csv(f"data_walkthrough_panel_stats_{idx}.csv", index=False)
         
-        t_dollars = true_sorted[-k:].sum() * scale_factor
-        r_dollars = rep_sorted[-k:].sum() * scale_factor
-        ts.append(t_dollars)
-        rs.append(r_dollars)
+        # --- Option A line chart curves ---
+        print("  Computing Dollar-Weighted Evasion Curves...")
+        idx_t = np.argsort(y_true)
+        idx_r = np.argsort(y_rep)
+        grid_pct = np.logspace(0, -2, 100)
         
-        evaded_by_true_top = (true_sorted[-k:].sum() - rep_of_true_top[-k:].sum())
-        es_true.append(evaded_by_true_top / true_sorted[-k:].sum())
+        true_sorted = y_true[idx_t]
+        rep_sorted = y_rep[idx_r]
+        rep_of_true_top = y_rep[idx_t]
+        true_of_rep_top = y_true[idx_r]
         
-        true_dollars_of_rep_top = true_of_rep_top[-k:].sum()
-        evaded_by_rep_top = true_dollars_of_rep_top - rep_sorted[-k:].sum()
-        es_rep.append(evaded_by_rep_top / true_dollars_of_rep_top)
+        ts, rs, es_rep, es_true = [], [], [], []
+        
+        for p in grid_pct:
+            k = max(int(n_agents_sample * (p/100)), 1)
+            
+            t_dollars = true_sorted[-k:].sum() * scale_factor
+            r_dollars = rep_sorted[-k:].sum() * scale_factor
+            ts.append(t_dollars)
+            rs.append(r_dollars)
+            
+            evaded_by_true_top = (true_sorted[-k:].sum() - rep_of_true_top[-k:].sum())
+            es_true.append(evaded_by_true_top / true_sorted[-k:].sum())
+            
+            true_dollars_of_rep_top = true_of_rep_top[-k:].sum()
+            evaded_by_rep_top = true_dollars_of_rep_top - rep_sorted[-k:].sum()
+            es_rep.append(evaded_by_rep_top / true_dollars_of_rep_top)
+        
+        pd.DataFrame({
+            'grid_pct': grid_pct, 
+            'true_dollars_usd': ts, 
+            'rep_dollars_usd': rs, 
+            'evasion_rate_true_top': es_true, 
+            'evasion_rate_rep_top': es_rep
+        }).to_csv(f"data_walkthrough_scaled_lines_{idx}.csv", index=False)
+        
+        del y_true, y_rep
 
-    pd.DataFrame({
-        'grid_pct': grid_pct, 
-        'true_dollars_usd': ts, 
-        'rep_dollars_usd': rs, 
-        'evasion_rate_true_top': es_true, 
-        'evasion_rate_rep_top': es_rep
-    }).to_csv("data_walkthrough_scaled_lines.csv", index=False)
+    # Save scenario metadata for the plotting script
+    pd.DataFrame([
+        {'idx': i, 'Label': label, 'Beta': b, 'Sigma': s}
+        for i, (label, b, s) in enumerate(scenarios)
+    ]).to_csv("data_walkthrough_scenarios.csv", index=False)
 
-    print("Walkthrough and Line Data saved.")
+    print("\nWalkthrough data saved for all scenarios.")
+
 
 def calculate_parameter_intuition(gamma=0.05, sigma_nu=1.4, inc_dist='lognormal', noise_dist='beta', n_agents=5000000):
     """
@@ -440,7 +443,7 @@ if __name__ == "__main__":
 
     # 2. SCALED WALKTHROUGH (Main Figures)
     # Generates totals for 330M population and Option A line curves.
-    compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_dist='lognormal', noise_dist='beta')
+    compute_walkthrough(n_agents_sample=50000000, n_target_pop=330000000, inc_dist='lognormal', noise_dist='beta')
 
     # 3. BASELINE GRID (Table 1)
     # A smaller, high-precision run for the main text tables.
