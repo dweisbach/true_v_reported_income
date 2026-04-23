@@ -166,9 +166,12 @@ def plot_walkthrough():
         ax1.text(0.98, 0.95, txt_box, transform=ax1.transAxes, fontsize=10, 
                  ha='right', va='top', bbox=dict(boxstyle="round", facecolor='white', alpha=0.9))
 
+        panel_left = chr(ord('A') + 2 * row)      # A, C, E, ...
+        panel_right = chr(ord('A') + 2 * row + 1)  # B, D, F, ...
+
         ax1.set_xlabel("Log Income")
         ax1.set_ylabel("Density")
-        ax1.set_title(f"{label}: Distributions & Cutoffs")
+        ax1.set_title(f"{panel_left}. {label} ($\\gamma={stats['Beta']:.2f}, \\sigma_\\nu={stats['Sigma']:.1f}$)")
         if row == 0:
             ax1.legend(loc='upper left')
 
@@ -197,7 +200,7 @@ def plot_walkthrough():
         lines2, labels2 = ax2t.get_legend_handles_labels()
         if row == 0:
             ax2.legend(lines + lines2, labels_l + labels2, loc='upper right', fontsize=9)
-        ax2.set_title(f"{label}: Top Shares & Evasion Intensity")
+        ax2.set_title(f"{panel_right}. {label} ($\\gamma={stats['Beta']:.2f}, \\sigma_\\nu={stats['Sigma']:.1f}$)")
 
     # Conform axes across all left-column (KDE) panels
     left_axes = [axes[r, 0] for r in range(n_rows)]
@@ -212,6 +215,128 @@ def plot_walkthrough():
     plt.tight_layout()
     plt.savefig("Fig_Walkthrough_Clean.pdf")
     print("Walkthrough figure saved.")    
+
+
+
+
+def plot_walkthrough_dollars():
+    """
+    1x2 figure showing dollar-space income densities for each walkthrough scenario.
+    
+    Technique: KDE is fitted in log-income space, then transformed to dollar-space
+    via change of variables. If Z = ln(X) and f_Z is the log-space density, the
+    dollar-space density is f_X(x) = f_Z(ln x) / x. This is a proper density
+    (integrates to 1 over dollars) because the Jacobian dz/dx = 1/x exactly
+    compensates: integral f_Z(ln x)/x dx = integral f_Z(z) dz = 1.
+    
+    The transformation amplifies density at low dollar values and suppresses it
+    at high values, making visible the excess reported density at low incomes
+    caused by heavy evaders being pushed down the distribution.
+    """
+    print("Plotting Walkthrough Figure (Dollar Scale)...")
+    
+    try:
+        df_scenarios = pd.read_csv("data_walkthrough_scenarios.csv")
+    except FileNotFoundError:
+        print("Error: data_walkthrough_scenarios.csv not found. Run compute_walkthrough first.")
+        return
+    
+    from scipy.stats import gaussian_kde
+    import matplotlib.ticker as mticker
+    
+    n_panels = len(df_scenarios)
+    fig, axes = plt.subplots(1, n_panels, figsize=(7 * n_panels, 6))
+    
+    if n_panels == 1:
+        axes = [axes]
+    
+    def _dollar_fmt(x, _):
+        if x >= 1e6: return f"${x/1e6:.0f}M"
+        if x >= 1e3: return f"${x/1e3:.0f}K"
+        return f"${x:.0f}"
+    
+    dollar_floor = 1.0
+    dollar_ceiling = 5e6
+    x_grid = np.logspace(np.log10(dollar_floor), np.log10(dollar_ceiling), 500)
+    log_grid = np.log(x_grid)
+    
+    for col, (_, scenario) in enumerate(df_scenarios.iterrows()):
+        idx = int(scenario['idx'])
+        label = scenario['Label']
+        
+        try:
+            df_kde = pd.read_csv(f"data_walkthrough_kde_{idx}.csv")
+            stats = pd.read_csv(f"data_walkthrough_panel_stats_{idx}.csv").iloc[0]
+        except FileNotFoundError:
+            print(f"  [Warning] Missing data for scenario {idx} ({label}). Skipping.")
+            continue
+        
+        ax = axes[col]
+        
+        # --- KDE in log-space, transformed to dollar-space ---
+        true_vals = df_kde['True'][df_kde['True'] > dollar_floor].values
+        rep_vals = df_kde['Reported'][df_kde['Reported'] > dollar_floor].values
+        
+        kde_true = gaussian_kde(np.log(true_vals), bw_method=0.2)
+        kde_rep = gaussian_kde(np.log(rep_vals), bw_method=0.2)
+        
+        density_true = kde_true(log_grid) / x_grid
+        density_rep = kde_rep(log_grid) / x_grid
+        
+        # Unreported amount
+        unreported = np.maximum(df_kde['True'] - df_kde['Reported'], 0)
+        unrep_vals = unreported[unreported > dollar_floor].values
+        if len(unrep_vals) > 100:
+            kde_unrep = gaussian_kde(np.log(unrep_vals), bw_method=0.2)
+            density_unrep = kde_unrep(log_grid) / x_grid
+            ax.plot(x_grid, density_unrep, color='purple', lw=2, ls=':', label='Unreported Amount')
+        
+        ax.fill_between(x_grid, density_true, alpha=0.3, color='tab:red')
+        ax.plot(x_grid, density_true, color='tab:red', lw=2, label='True')
+        ax.fill_between(x_grid, density_rep, alpha=0.3, color='tab:blue')
+        ax.plot(x_grid, density_rep, color='tab:blue', lw=2, ls='--', label='Reported')
+        
+        ax.set_xscale('log')
+        
+        ax.axvline(stats['Cutoff_True'], color='gray', alpha=0.6, lw=1.5)
+        ax.axvline(stats['Cutoff_Rep'], color='gray', alpha=0.6, lw=1.5, ls='--')
+        
+        mean_val = stats['TargetMean']
+        ax.axvline(mean_val, color='k', alpha=0.4)
+
+        txt_box = (f"Top 1% Cutoff:\n"
+                   f"True: ${stats['Cutoff_True']:,.0f}\n"
+                   f"Reported: ${stats['Cutoff_Rep']:,.0f}\n"
+                   f"Gap: $ {stats['Cutoff_True'] - stats['Cutoff_Rep']:,.0f}\n"
+                   f"----------\n"
+                   f"Total True: ${stats['Total_True']/1e12:.2f}T\n"
+                   f"Total Rep: ${stats['Total_Rep']/1e12:.2f}T\n"
+                   f"Relative Income Gap: {stats['Tax_Gap']:.1%}")
+        
+        ax.text(0.98, 0.95, txt_box, transform=ax.transAxes, fontsize=10, 
+                ha='right', va='top', bbox=dict(boxstyle="round", facecolor='white', alpha=0.9))
+
+        panel_letter = chr(ord('A') + col)
+        ax.set_xlabel("Income ($)")
+        ax.set_ylabel("Density" if col == 0 else "")
+        ax.set_title(f"{panel_letter}. {label} ($\\gamma={stats['Beta']:.2f}, \\sigma_\\nu={stats['Sigma']:.1f}$)")
+        ax.xaxis.set_major_formatter(mticker.FuncFormatter(_dollar_fmt))
+        ax.xaxis.set_major_locator(mticker.LogLocator(base=10, numticks=8))
+        
+        if col == 0:
+            ax.legend(loc='upper left')
+
+    # Conform axes across all panels
+    all_xlims = [ax.get_xlim() for ax in axes]
+    shared_xlim = (min(x[0] for x in all_xlims), max(x[1] for x in all_xlims))
+    for ax in axes:
+        ax.set_xlim(shared_xlim)
+        ax.set_ylim(0, 6e-5)
+
+    plt.tight_layout()
+    plt.savefig("Fig_Walkthrough_Dollars.pdf")
+    print("Walkthrough figure (dollar scale) saved.")
+
 
 
 
@@ -659,6 +784,7 @@ if __name__ == "__main__":
     #plot_small_heatmaps()
     #plot_share_lines()
     plot_walkthrough()
+    plot_walkthrough_dollars()
     
     # 3. Original Dynamic Heatmaps
     #generate_all_robustness_1x2()

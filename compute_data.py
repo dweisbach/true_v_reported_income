@@ -24,6 +24,10 @@ TARGET_MEAN = 65000
 BASE_EVASION = 0.10  # Matches empirical aggregate tax gap
 WALKTHROUGH_BETA = 0.05
 WALKTHROUGH_SIGMA = 1.4
+WALKTHROUGH_SCENARIOS = [
+    ("Proportional Evasion", 0.0, 0.0),
+    ("Prog / Hetero", 0.05, 1.4),
+]
 BETA_VALS = np.round(np.arange(-0.10, 0.31, 0.05), 2)
 SIGMA_VALS = np.round(np.arange(0.0, 3.1, 0.2), 1)
 
@@ -256,10 +260,7 @@ def compute_core_grid(n_agents=1000000):
 # 2. WALKTHROUGH & INTUITION COMPUTATIONS
 # =============================================================================
 def compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_dist='lognormal', noise_dist='beta',
-                        scenarios=[
-       ("Baseline (no progressivity)", 0.0, 0.0),     # Row 1: heterogeneity only
-       ("Full Model", 0.05, 1.4),                     # Row 2: progressivity + heterogeneity
-   ]):
+                        scenarios=None):
     """
     Computes scaled walkthrough data and Option A line-chart curves.
     Uses a RAM-safe sample and scales aggregates to the full US population.
@@ -268,18 +269,17 @@ def compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_di
     ----------
     scenarios : list of (label, beta, sigma_nu) tuples, optional
         Each tuple defines one row of the walkthrough figure.
-        Default: two rows — (0,0) baseline and (WALKTHROUGH_BETA, WALKTHROUGH_SIGMA).
+        Default: uses WALKTHROUGH_SCENARIOS module constant.
     """
-    scale_factor = n_target_pop / n_agents_sample 
-    
     if scenarios is None:
-        scenarios = [
-            ("No Evasion Heterogeneity", 0.0, 0.0),
-            ("With Evasion Heterogeneity", WALKTHROUGH_BETA, WALKTHROUGH_SIGMA)
-        ]
+        scenarios = WALKTHROUGH_SCENARIOS
+    
+    scale_factor = n_target_pop / n_agents_sample 
     
     print(f"--- COMPUTING SCALED WALKTHROUGH ({len(scenarios)} scenarios) ---")
     print(f"Scaling factor: {scale_factor:.1f}x ({n_target_pop:,} target)")
+ 
+    decomp_list = []  # Accumulates share decomposition stats for the walkthrough table
 
     for idx, (label, beta, sigma_nu) in enumerate(scenarios):
         print(f"\n  Scenario {idx}: {label} (Beta={beta}, Sigma={sigma_nu})")
@@ -318,6 +318,22 @@ def compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_di
         print("  Computing Dollar-Weighted Evasion Curves...")
         idx_t = np.argsort(y_true)
         idx_r = np.argsort(y_rep)
+        
+        # --- Share decomposition for walkthrough table ---
+        total_true = y_true.sum()
+        total_rep = y_rep.sum()
+        s_true = y_true[idx_t[-k1:]].sum() / total_true
+        s_rep = y_rep[idx_r[-k1:]].sum() / total_rep
+        s_true_given_rep = y_true[idx_r[-k1:]].sum() / total_true
+        s_rep_given_true = y_rep[idx_t[-k1:]].sum() / total_rep
+        
+        decomp_list.append({
+            'Step': label, 'Beta': beta, 'Sigma': sigma_nu,
+            's_true': s_true, 's_rep': s_rep,
+            's_true_given_rep': s_true_given_rep,
+            's_rep_given_true': s_rep_given_true
+        })
+        
         grid_pct = np.logspace(0, -2, 100)
         
         true_sorted = y_true[idx_t]
@@ -357,6 +373,9 @@ def compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_di
         {'idx': i, 'Label': label, 'Beta': b, 'Sigma': s}
         for i, (label, b, s) in enumerate(scenarios)
     ]).to_csv("data_walkthrough_scenarios.csv", index=False)
+
+    # Save share decomposition table
+    pd.DataFrame(decomp_list).to_csv("data_walkthrough_stats.csv", index=False)
 
     print("\nWalkthrough data saved for all scenarios.")
 
@@ -479,3 +498,6 @@ if __name__ == "__main__":
 
     elapsed = time.time() - start_time
     print(f"\n--- Total Execution Time: {elapsed/60:.2f} minutes ---")
+
+
+
