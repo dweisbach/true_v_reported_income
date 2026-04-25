@@ -142,8 +142,9 @@ def plot_walkthrough():
         sns.kdeplot(x=np.log(df_kde['True']), ax=ax1, color='tab:red', lw=2, label='True')
         sns.kdeplot(x=np.log(df_kde['Reported']), ax=ax1, color='tab:blue', lw=2, ls='--', label='Reported')
         
-        unreported = np.maximum(df_kde['True'] - df_kde['Reported'], 1)
-        sns.kdeplot(x=np.log(unreported), ax=ax1, color='purple', lw=2, ls=':', label='Unreported Amount')
+        unreported = df_kde['True'] - df_kde['Reported']
+        unrep_pos = unreported[unreported > 0]
+        sns.kdeplot(x=np.log(unrep_pos), ax=ax1, color='purple', lw=2, ls=':', label='Unreported Amount')
 
         ax1.axvline(np.log(stats['Cutoff_True']), color='gray', alpha=0.6, lw=1.5)
         ax1.axvline(np.log(stats['Cutoff_Rep']), color='gray', alpha=0.6, lw=1.5, ls='--')
@@ -204,9 +205,7 @@ def plot_walkthrough():
 
     # Conform axes across all left-column (KDE) panels
     left_axes = [axes[r, 0] for r in range(n_rows)]
-    all_xlims = [ax.get_xlim() for ax in left_axes]
-    all_ylims = [ax.get_ylim() for ax in left_axes]
-    shared_xlim = (max(x[0] for x in all_xlims), max(x[1] for x in all_xlims))
+    shared_xlim = (0, max(ax.get_xlim()[1] for ax in left_axes))
     shared_ylim = (0, 0.35)
     for ax in left_axes:
         ax.set_xlim(shared_xlim)
@@ -215,7 +214,6 @@ def plot_walkthrough():
     plt.tight_layout()
     plt.savefig("Fig_Walkthrough_Clean.pdf")
     print("Walkthrough figure saved.")    
-
 
 
 
@@ -289,7 +287,7 @@ def plot_walkthrough_dollars():
         if len(unrep_vals) > 100:
             kde_unrep = gaussian_kde(np.log(unrep_vals), bw_method=0.2)
             density_unrep = kde_unrep(log_grid) / x_grid
-            ax.plot(x_grid, density_unrep, color='purple', lw=2, ls=':', label='Unreported Amount')
+            ax.plot(x_grid, density_unrep, color='darkviolet', lw=1.5, ls='-', alpha=0.8, label='Unreported Amount')
         
         ax.fill_between(x_grid, density_true, alpha=0.3, color='tab:red')
         ax.plot(x_grid, density_true, color='tab:red', lw=2, label='True')
@@ -338,7 +336,80 @@ def plot_walkthrough_dollars():
     print("Walkthrough figure (dollar scale) saved.")
 
 
-
+def plot_heterogeneity_table():
+    """Generates a LaTeX table summarizing the heterogeneity profile for each scenario."""
+    print("Generating Heterogeneity Profile Table...")
+    df = _load_csv("data_heterogeneity_profile.csv")
+    if df is None: return
+    
+    # Build the table rows
+    def _pct(val):
+        """Format as percentage with escaped % for LaTeX."""
+        return f"{val:.1%}".replace('%', '\\%')
+    
+    rows = []
+    for _, r in df.iterrows():
+        rows.append({
+            'Scenario': f"{r['Scenario']} ($\\gamma={r['Beta']:.2f}, \\sigma_\\nu={r['Sigma']:.1f}$)",
+            'Aggregate income gap': _pct(r['Aggregate_Gap']),
+            'Avg evasion (top 1\\%)': _pct(r['DW_Evasion_Top1']),
+            'Median evasion (top 1\\%)': _pct(r['Median_Evasion_Top1']),
+            '90th pct evasion (top 1\\%)': _pct(r['P90_Evasion_Top1']),
+            '$P(e > 25\\% \\mid \\text{top 1\\%})$': _pct(r['Frac_Above_25pct']),
+            '$P(e > 50\\% \\mid \\text{top 1\\%})$': _pct(r['Frac_Above_50pct']),
+            'Share of evasion from top 10\\% of evaders': _pct(r['Share_From_Top10_Evaders']),
+            'Fraction of true top 1\\% not in reported top 1\\%': _pct(r['Frac_True_Top1_Not_In_Rep_Top1']),
+            'Spearman rank correlation': f"{r['Spearman_Rho']:.3f}",
+        })
+    
+    out_df = pd.DataFrame(rows).set_index('Scenario').T
+    out_df.index.name = ''
+    
+    # Print readable version
+    print(out_df.to_string())
+    
+    # Generate LaTeX
+    lines = []
+    lines.append(r'\begin{table}[h!]')
+    lines.append(r'    \centering')
+    lines.append(r'    \caption{Implied Evasion Heterogeneity in Benchmark Economy}')
+    lines.append(r'    \label{tab:heterogeneity_profile}')
+    lines.append(r'    \footnotesize')
+    
+    # Use p{} for the stat name column to allow wrapping
+    n_scenarios = len(df)
+    col_spec = r'p{5.5cm}' + 'c' * n_scenarios
+    lines.append(r'    \begin{tabular}{' + col_spec + '}')
+    lines.append(r'        \toprule')
+    
+    # Header: use parbox to constrain width and center
+    header_cells = []
+    for _, r in df.iterrows():
+        name = r['Scenario']
+        params = f"$\\gamma={r['Beta']:.2f}, \\sigma_\\nu={r['Sigma']:.1f}$"
+        header_cells.append(f"\\parbox[b]{{3.5cm}}{{\\centering \\textbf{{{name}}} \\\\ ({params})}}")
+    headers = ' & '.join(header_cells)
+    lines.append(f'        & {headers} \\\\')
+    lines.append(r'        \midrule')
+    
+    # Data rows
+    for stat_name in out_df.index:
+        vals = ' & '.join([out_df.loc[stat_name, col] for col in out_df.columns])
+        lines.append(f'        {stat_name} & {vals} \\\\')
+    
+    lines.append(r'        \bottomrule')
+    lines.append(r'    \end{tabular}')
+    lines.append(r'    \vspace{0.3cm}')
+    lines.append(r"    \parbox{\linewidth}{\footnotesize \textbf{Notes:} Statistics computed from a simulated economy. ``Avg evasion (top 1\%)'' is dollar-weighted. ``Share of evasion from top 10\% of evaders'' is the fraction of total unreported income within the true top 1\% attributable to the 10\% of top-1\% individuals with the largest unreported amounts. ``Fraction of true top 1\% not in reported top 1\%'' measures reranking across the percentile cutoff. Spearman rank correlation is computed on a 1M subsample.}")
+    lines.append(r'\end{table}')
+    
+    latex_str = '\n'.join(lines)
+    
+    with open("Tab_Heterogeneity_Profile.tex", 'w') as f:
+        f.write(latex_str)
+    
+    print(f"\nLaTeX table saved to Tab_Heterogeneity_Profile.tex")
+    print("\n" + latex_str)
 
 
 
@@ -464,9 +535,27 @@ def _plot_heatmap_set(df, suffix, is_big):
     
     sns.heatmap(agg, ax=ax[1], cmap="Reds", **pct_kw_right)
     ax[1].set(title="B. Aggregate Income Gap", xlabel=r"Evasion Heterogeneity ($\sigma_\nu$)", ylabel="") 
-    
+  
     plt.tight_layout()
     plt.savefig(f"Fig_Combined_EvasionGap{suffix}.pdf")
+
+# --- F. HETEROGENEITY DIAGNOSTICS: 90th Pct Evasion & Reranking ---
+    if 'p90_evasion_top1' in df.columns:
+        p90 = pivot_grid(df, 'p90_evasion_top1')
+        rerank = pivot_grid(df, 'frac_reranked_top1')
+        for g in [p90, rerank]:
+            g.index = [f"{idx:.2f}" for idx in g.index]
+            g.columns = [f"{col:.1f}" for col in g.columns]
+        
+        fig, ax = plt.subplots(1, 2, figsize=(14, 6))
+        sns.heatmap(p90, ax=ax[0], cmap="Reds", **pct_kw_left)
+        ax[0].set(title="A. 90th Pct Evasion (Top 1%)", ylabel=r"Evasion Progressivity ($\gamma$)", xlabel=r"Evasion Heterogeneity ($\sigma_\nu$)")
+        
+        sns.heatmap(rerank, ax=ax[1], cmap="Reds", **pct_kw_right)
+        ax[1].set(title="B. Fraction of True Top 1% Reranked Out", xlabel=r"Evasion Heterogeneity ($\sigma_\nu$)", ylabel="")
+        
+        plt.tight_layout()
+        plt.savefig(f"Fig_HeterogeneityDiagnostics{suffix}.pdf")
 
     plt.close('all')
 
@@ -779,11 +868,12 @@ if __name__ == "__main__":
     # 1. Main Text Tables
     #plot_table1()
     #plot_walkthrough_table()
+    #plot_heterogeneity_table()
     
     # 2. Main Text Small Figures
     #plot_small_heatmaps()
     #plot_share_lines()
-    plot_walkthrough()
+    #plot_walkthrough()
     plot_walkthrough_dollars()
     
     # 3. Original Dynamic Heatmaps
