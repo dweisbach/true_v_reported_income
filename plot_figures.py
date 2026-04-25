@@ -464,6 +464,127 @@ def plot_walkthrough_table():
         print("\n[Note] 's_rep_given_true' not found in data_walkthrough_stats.csv. Alternative Table skipped.")
 
 
+
+def plot_evasion_distributions(gamma=0.05, nu=1.4, idx=None):
+    """
+    Side-by-side: conditional beta density at top-1% income (analytical, using
+    realized top-1% mean) + population density of e (KDE on simulated rates from
+    the walkthrough CSV).
+
+    If idx is None, picks the scenario in data_walkthrough_scenarios.csv whose
+    (Beta, Sigma) match (gamma, nu).
+    """
+    print(f"Plotting Evasion Distributions (gamma={gamma}, nu={nu})...")
+    from scipy.stats import beta as beta_dist, gaussian_kde
+
+    # --- Locate the matching scenario in the walkthrough data ----------
+    try:
+        df_scenarios = pd.read_csv("data_walkthrough_scenarios.csv")
+    except FileNotFoundError:
+        print("Error: data_walkthrough_scenarios.csv not found.")
+        return
+
+    if idx is None:
+        match = df_scenarios[
+            np.isclose(df_scenarios['Beta'], gamma, atol=1e-5) &
+            np.isclose(df_scenarios['Sigma'], nu, atol=1e-5)
+        ]
+        if match.empty:
+            print(f"  [Warning] No scenario found with gamma={gamma}, nu={nu}.")
+            return
+        idx = int(match.iloc[0]['idx'])
+
+    try:
+        df_kde = pd.read_csv(f"data_walkthrough_kde_{idx}.csv")
+    except FileNotFoundError:
+        print(f"  [Warning] Missing data_walkthrough_kde_{idx}.csv.")
+        return
+
+    # --- Compute population evasion rates from the walkthrough sample --
+    true_vals = df_kde['True'].values
+    rep_vals = df_kde['Reported'].values
+    valid = true_vals > 0
+    e_pop = np.clip((true_vals[valid] - rep_vals[valid]) / true_vals[valid], 0, 1)
+    y_pop = true_vals[valid]
+
+    # --- Realized top-1% subsample (for panel A) -----------------------
+    top1_thresh = np.quantile(y_pop, 0.99)
+    e_top = e_pop[y_pop >= top1_thresh]
+    mu_top = e_top.mean()
+
+    # Beta parameters using realized conditional mean
+    a_top = mu_top / nu
+    b_top = (1 - mu_top) / nu
+
+    # Endpoint mass from the analytical beta (matches the curve)
+    mass_left  = beta_dist.cdf(0.05, a_top, b_top)
+    mass_right = 1 - beta_dist.cdf(0.95, a_top, b_top)
+
+    e_grid = np.linspace(0.001, 0.999, 600)
+    pdf_top = beta_dist.pdf(e_grid, a_top, b_top)
+
+    # --- Population density via reflected KDE --------------------------
+    sample = np.concatenate([e_pop, -e_pop, 2 - e_pop])
+    kde = gaussian_kde(sample, bw_method=0.03)
+    e_grid_pop = np.linspace(0, 1, 600)
+    density_pop = 3 * kde(e_grid_pop)
+
+    # Empirical endpoint mass (population)
+    mass_left_pop  = (e_pop <= 0.05).mean()
+    mass_right_pop = (e_pop >= 0.95).mean()
+
+    # --- Plot ----------------------------------------------------------
+    COLOR = 'steelblue'
+    YMAX = 1.2
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+    ax = axes[0]
+    ax.plot(e_grid, pdf_top, color=COLOR, lw=2.5)
+    ax.fill_between(e_grid, 0, pdf_top, color=COLOR, alpha=0.2)
+    ax.set_xlim(0, 1); ax.set_ylim(0, YMAX)
+    ax.set_xlabel("Evasion rate $e$")
+    ax.set_ylabel("Conditional density $g_e(e \\mid y_{0.99})$")
+    ax.set_title("A. Conditional distribution at top 1% income")
+    ax.text(0.02, 1.08, f"P($e \\leq 0.05$) $\\approx$ {mass_left:.0%}",
+            fontsize=10, ha='left', va='top',
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='lightgray'))
+    ax.text(0.98, 1.08, f"P($e \\geq 0.95$) $\\approx$ {mass_right:.0%}",
+            fontsize=10, ha='right', va='top',
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='lightgray'))
+    ax.text(0.5, 1.16,
+            f"Realized top-1% mean evasion $\\bar{{e}}_{{0.99}} = {mu_top:.3f}$. "
+            f"Density unbounded at $e=0,1$; axis clipped at {YMAX}.",
+            fontsize=8, ha='center', va='top', style='italic', color='gray')
+
+    ax = axes[1]
+    ax.plot(e_grid_pop, density_pop, color=COLOR, lw=2.5)
+    ax.fill_between(e_grid_pop, 0, density_pop, color=COLOR, alpha=0.2)
+    ax.set_xlim(0, 1); ax.set_ylim(0, YMAX)
+    ax.set_xlabel("Evasion rate $e$")
+    ax.set_ylabel("Population density")
+    ax.set_title("B. Population distribution of $e$")
+    ax.text(0.02, 1.08, f"{mass_left_pop:.0%} report\n$\\geq$ 95% of income",
+            fontsize=10, ha='left', va='top',
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='lightgray'))
+    ax.text(0.98, 1.08, f"{mass_right_pop:.0%} hide\n$\\geq$ 95% of income",
+            fontsize=10, ha='right', va='top',
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='lightgray'))
+    peak = density_pop.max()
+    if peak > YMAX:
+        ax.text(0.5, 1.16,
+                f"Spike at $e=0$ reaches {peak:.0f}; axis clipped at {YMAX}.",
+                fontsize=8, ha='center', va='top', style='italic', color='gray')
+
+    fig.suptitle(f"Implied evasion distribution ($\\gamma = {gamma},\\ \\sigma_\\nu = {nu}$)",
+                 fontsize=12, y=1.02)
+
+    plt.tight_layout()
+    plt.savefig("Fig_Evasion_Distributions.pdf", bbox_inches='tight')
+    plt.close()
+    print(f"  Saved Fig_Evasion_Distributions.pdf (mu_top = {mu_top:.4f}, n_top = {len(e_top)})")
+
+
+
 # =============================================================================
 # 2. HEATMAPS (CORE & ROBUSTNESS)
 # =============================================================================
@@ -874,7 +995,8 @@ if __name__ == "__main__":
     #plot_small_heatmaps()
     #plot_share_lines()
     #plot_walkthrough()
-    plot_walkthrough_dollars()
+    #plot_walkthrough_dollars()
+    plot_evasion_distributions(gamma=0.05, nu=1.4)
     
     # 3. Original Dynamic Heatmaps
     #generate_all_robustness_1x2()
