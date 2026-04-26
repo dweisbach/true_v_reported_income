@@ -172,7 +172,7 @@ def plot_walkthrough():
 
         ax1.set_xlabel("Log Income")
         ax1.set_ylabel("Density")
-        ax1.set_title(f"{panel_left}. {label} ($\\gamma={stats['Beta']:.2f}, \\sigma_\\nu={stats['Sigma']:.1f}$)")
+        ax1.set_title(f"{panel_left}. {label} ($\\gamma={stats['Beta']:.2f}, \\nu={stats['Sigma']:.1f}$)")
         if row == 0:
             ax1.legend(loc='upper left')
 
@@ -201,7 +201,7 @@ def plot_walkthrough():
         lines2, labels2 = ax2t.get_legend_handles_labels()
         if row == 0:
             ax2.legend(lines + lines2, labels_l + labels2, loc='upper right', fontsize=9)
-        ax2.set_title(f"{panel_right}. {label} ($\\gamma={stats['Beta']:.2f}, \\sigma_\\nu={stats['Sigma']:.1f}$)")
+        ax2.set_title(f"{panel_right}. {label} ($\\gamma={stats['Beta']:.2f}, \\nu={stats['Sigma']:.1f}$)")
 
     # Conform axes across all left-column (KDE) panels
     left_axes = [axes[r, 0] for r in range(n_rows)]
@@ -317,7 +317,7 @@ def plot_walkthrough_dollars():
         panel_letter = chr(ord('A') + col)
         ax.set_xlabel("Income ($)")
         ax.set_ylabel("Density" if col == 0 else "")
-        ax.set_title(f"{panel_letter}. {label} ($\\gamma={stats['Beta']:.2f}, \\sigma_\\nu={stats['Sigma']:.1f}$)")
+        ax.set_title(f"{panel_letter}. {label} ($\\gamma={stats['Beta']:.2f}, \\nu={stats['Sigma']:.1f}$)")
         ax.xaxis.set_major_formatter(mticker.FuncFormatter(_dollar_fmt))
         ax.xaxis.set_major_locator(mticker.LogLocator(base=10, numticks=8))
         
@@ -350,7 +350,7 @@ def plot_heterogeneity_table():
     rows = []
     for _, r in df.iterrows():
         rows.append({
-            'Scenario': f"{r['Scenario']} ($\\gamma={r['Beta']:.2f}, \\sigma_\\nu={r['Sigma']:.1f}$)",
+            'Scenario': f"{r['Scenario']} ($\\gamma={r['Beta']:.2f}, \\nu={r['Sigma']:.1f}$)",
             'Aggregate income gap': _pct(r['Aggregate_Gap']),
             'Avg evasion (top 1\\%)': _pct(r['DW_Evasion_Top1']),
             'Median evasion (top 1\\%)': _pct(r['Median_Evasion_Top1']),
@@ -386,7 +386,7 @@ def plot_heterogeneity_table():
     header_cells = []
     for _, r in df.iterrows():
         name = r['Scenario']
-        params = f"$\\gamma={r['Beta']:.2f}, \\sigma_\\nu={r['Sigma']:.1f}$"
+        params = f"$\\gamma={r['Beta']:.2f}, \\nu={r['Sigma']:.1f}$"
         header_cells.append(f"\\parbox[b]{{3.5cm}}{{\\centering \\textbf{{{name}}} \\\\ ({params})}}")
     headers = ' & '.join(header_cells)
     lines.append(f'        & {headers} \\\\')
@@ -429,7 +429,7 @@ def plot_walkthrough_table():
         out_list_std.append({
             "Narrative Step": row['Step'], 
             "Gamma": f"{row['Beta']:.2f}",
-            "Sigma": f"{row['Sigma']:.1f}",
+            "nu": f"{row['Sigma']:.1f}",
             "True Share": _fmt_pct(s_true),
             "Rep. Share": _fmt_pct(s_rep),
             "Total Gap": _fmt_pct(s_rep - s_true, sign=True), 
@@ -442,7 +442,7 @@ def plot_walkthrough_table():
             out_list_alt.append({
                 "Narrative Step": row['Step'], 
                 "Gamma": f"{row['Beta']:.2f}",
-                "Sigma": f"{row['Sigma']:.1f}",
+                "nu": f"{row['Sigma']:.1f}",
                 "True Share": _fmt_pct(s_true),
                 "Rep. Share": _fmt_pct(s_rep),
                 "Total Gap": _fmt_pct(s_rep - s_true, sign=True), 
@@ -575,7 +575,7 @@ def plot_evasion_distributions(gamma=0.05, nu=1.4, idx=None):
                 f"Spike at $e=0$ reaches {peak:.0f}; axis clipped at {YMAX}.",
                 fontsize=8, ha='center', va='top', style='italic', color='gray')
 
-    fig.suptitle(f"Implied evasion distribution ($\\gamma = {gamma},\\ \\sigma_\\nu = {nu}$)",
+    fig.suptitle(f"Implied evasion distribution ($\\gamma = {gamma},\\ \\nu = {nu}$)",
                  fontsize=12, y=1.02)
 
     plt.tight_layout()
@@ -584,6 +584,68 @@ def plot_evasion_distributions(gamma=0.05, nu=1.4, idx=None):
     print(f"  Saved Fig_Evasion_Distributions.pdf (mu_top = {mu_top:.4f}, n_top = {len(e_top)})")
 
 
+
+def plot_evasion_profiles(scenarios=None):
+    """
+    Side-by-side panels showing average evasion rate as a function of income.
+    Reads pre-computed bin averages from data_walkthrough_evasion_profile_{idx}.csv.
+    """
+    print("Plotting Evasion Profiles...")
+
+    if scenarios is None:
+        scenarios = [(0.10, 1.4), (-0.05, 1.4)]
+
+    try:
+        df_scenarios = pd.read_csv("data_walkthrough_scenarios.csv")
+    except FileNotFoundError:
+        print("  [Warning] data_walkthrough_scenarios.csv not found.")
+        return
+
+    fig, axes = plt.subplots(1, len(scenarios), figsize=(7 * len(scenarios), 5),
+                             sharey=True)
+    if len(scenarios) == 1:
+        axes = [axes]
+
+    for ax, (gamma, sigma) in zip(axes, scenarios):
+        match = df_scenarios[
+            np.isclose(df_scenarios['Beta'], gamma, atol=1e-5) &
+            np.isclose(df_scenarios['Sigma'], sigma, atol=1e-5)
+        ]
+        if match.empty:
+            ax.text(0.5, 0.5,
+                    f"No walkthrough data for\n$\\gamma={gamma}, \\nu={sigma}$",
+                    ha='center', va='center', transform=ax.transAxes,
+                    fontsize=11, color='gray')
+            ax.set_title(f"$\\gamma = {gamma},\\ \\nu = {sigma}$")
+            continue
+        idx = int(match.iloc[0]['idx'])
+
+        try:
+            df = pd.read_csv(f"data_walkthrough_evasion_profile_{idx}.csv")
+        except FileNotFoundError:
+            ax.text(0.5, 0.5, f"Missing data_walkthrough_evasion_profile_{idx}.csv",
+                    ha='center', va='center', transform=ax.transAxes,
+                    fontsize=11, color='gray')
+            continue
+
+        ax.plot(df['income_center'], df['avg_evasion_by_true'],
+                color='tab:blue', lw=2.0, label='vs True Income')
+        ax.plot(df['income_center'], df['avg_evasion_by_rep'],
+                color='tab:green', lw=2.0, ls='--', label='vs Reported Income')
+        ax.axhline(0.05, color='gray', ls=':', lw=1.0, label='Baseline (5%)')
+
+        ax.set_xscale('log')
+        ax.set_xlim(400, 3e6)
+        ax.set_ylim(0, 0.55)
+        ax.set_xlabel("Income ($)")
+        ax.set_ylabel("Avg Evasion Rate")
+        ax.set_title(f"$\\gamma = {gamma},\\ \\nu = {sigma}$")
+        ax.legend(loc='upper right', fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig("Fig_EvasionProfiles.pdf", bbox_inches='tight')
+    plt.close()
+    print("  Saved Fig_EvasionProfiles.pdf")
 
 # =============================================================================
 # 2. HEATMAPS (CORE & ROBUSTNESS)
@@ -607,9 +669,9 @@ def _plot_heatmap_set(df, suffix, is_big):
     # --- A. Evasion Rates (Separate) ---
     fig, ax = plt.subplots(1, 2, figsize=(14, 6))
     sns.heatmap(r1, ax=ax[0], cmap="Reds", **pct_kw_left)
-    ax[0].set(title="Avg Evasion Rate (Top 1%)", ylabel=r"Evasion Progressivity ($\gamma$)", xlabel=r"Evasion Heterogeneity ($\sigma_\nu$)")
+    ax[0].set(title="Avg Evasion Rate (Top 1%)", ylabel=r"Evasion Progressivity ($\gamma$)", xlabel=r"Evasion Heterogeneity ($\nu$)")
     sns.heatmap(r01, ax=ax[1], cmap="Reds", **pct_kw_right)
-    ax[1].set(title="Avg Evasion Rate (Top 0.1%)", xlabel=r"Evasion Heterogeneity ($\sigma_\nu$)", ylabel="") 
+    ax[1].set(title="Avg Evasion Rate (Top 0.1%)", xlabel=r"Evasion Heterogeneity ($\nu$)", ylabel="") 
     plt.tight_layout()
     plt.savefig(f"Fig_EvasionRates{suffix}.pdf")
 
@@ -618,7 +680,7 @@ def _plot_heatmap_set(df, suffix, is_big):
     sns.heatmap(agg, cmap="Reds", **pct_kw_right)
     plt.title("Aggregate Income Gap")
     plt.ylabel(r"Evasion Progressivity ($\gamma$)")
-    plt.xlabel(r"Evasion Heterogeneity ($\sigma_\nu$)")
+    plt.xlabel(r"Evasion Heterogeneity ($\nu$)")
     plt.tight_layout()
     plt.savefig(f"Fig_TaxGap{suffix}.pdf")
 
@@ -630,11 +692,11 @@ def _plot_heatmap_set(df, suffix, is_big):
     
     sns.heatmap(g1, ax=ax[0], **div_kw_left)
     if is_big: ax[0].contour(np.arange(len(g1.columns)), np.arange(len(g1.index)), gaussian_filter(g1.values, 0.8), levels=[0], colors='black', linewidths=2)
-    ax[0].set(title="Reported Income Gap: Top 1% Share", ylabel=r"Evasion Progressivity ($\gamma$)", xlabel=r"Evasion Heterogeneity ($\sigma_\nu$)")
+    ax[0].set(title="Reported Income Gap: Top 1% Share", ylabel=r"Evasion Progressivity ($\gamma$)", xlabel=r"Evasion Heterogeneity ($\nu$)")
     
     sns.heatmap(g01, ax=ax[1], **div_kw_right)
     if is_big: ax[1].contour(np.arange(len(g01.columns)), np.arange(len(g01.index)), gaussian_filter(g01.values, 0.8), levels=[0], colors='black', linewidths=2)
-    ax[1].set(title="Reported Income Gap: Top 0.1% Share", xlabel=r"Evasion Heterogeneity ($\sigma_\nu$)", ylabel="")
+    ax[1].set(title="Reported Income Gap: Top 0.1% Share", xlabel=r"Evasion Heterogeneity ($\nu$)", ylabel="")
     plt.tight_layout()
     plt.savefig(f"Fig_ReportedGap{suffix}.pdf")
 
@@ -645,17 +707,17 @@ def _plot_heatmap_set(df, suffix, is_big):
     if is_big: plt.contour(np.arange(len(gini.columns)), np.arange(len(gini.index)), gaussian_filter(gini.values, 0.8), levels=[0], colors='black', linewidths=2)
     plt.title("Gini Gap (Reported - True)")
     plt.ylabel(r"Evasion Progressivity ($\gamma$)")
-    plt.xlabel(r"Evasion Heterogeneity ($\sigma_\nu$)")
+    plt.xlabel(r"Evasion Heterogeneity ($\nu$)")
     plt.tight_layout()
     plt.savefig(f"Fig_GiniGap{suffix}.pdf")
     
     # --- E. COMBINED: Evasion Rate (1%) & Aggregate Gap ---
     fig, ax = plt.subplots(1, 2, figsize=(14, 6))
     sns.heatmap(r1, ax=ax[0], cmap="Reds", **pct_kw_left)
-    ax[0].set(title="A. Avg Evasion Rate (Top 1%)", ylabel=r"Evasion Progressivity ($\gamma$)", xlabel=r"Evasion Heterogeneity ($\sigma_\nu$)")
+    ax[0].set(title="A. Avg Evasion Rate (Top 1%)", ylabel=r"Evasion Progressivity ($\gamma$)", xlabel=r"Evasion Heterogeneity ($\nu$)")
     
     sns.heatmap(agg, ax=ax[1], cmap="Reds", **pct_kw_right)
-    ax[1].set(title="B. Aggregate Income Gap", xlabel=r"Evasion Heterogeneity ($\sigma_\nu$)", ylabel="") 
+    ax[1].set(title="B. Aggregate Income Gap", xlabel=r"Evasion Heterogeneity ($\nu$)", ylabel="") 
   
     plt.tight_layout()
     plt.savefig(f"Fig_Combined_EvasionGap{suffix}.pdf")
@@ -670,10 +732,10 @@ def _plot_heatmap_set(df, suffix, is_big):
         
         fig, ax = plt.subplots(1, 2, figsize=(14, 6))
         sns.heatmap(p90, ax=ax[0], cmap="Reds", **pct_kw_left)
-        ax[0].set(title="A. 90th Pct Evasion (Top 1%)", ylabel=r"Evasion Progressivity ($\gamma$)", xlabel=r"Evasion Heterogeneity ($\sigma_\nu$)")
+        ax[0].set(title="A. 90th Pct Evasion (Top 1%)", ylabel=r"Evasion Progressivity ($\gamma$)", xlabel=r"Evasion Heterogeneity ($\nu$)")
         
         sns.heatmap(rerank, ax=ax[1], cmap="Reds", **pct_kw_right)
-        ax[1].set(title="B. Fraction of True Top 1% Reranked Out", xlabel=r"Evasion Heterogeneity ($\sigma_\nu$)", ylabel="")
+        ax[1].set(title="B. Fraction of True Top 1% Reranked Out", xlabel=r"Evasion Heterogeneity ($\nu$)", ylabel="")
         
         plt.tight_layout()
         plt.savefig(f"Fig_HeterogeneityDiagnostics{suffix}.pdf")
@@ -756,7 +818,7 @@ def plot_robustness_1x2_metric(metric, file_prefix, cbar_label, cmap, norm=None,
                                pivot_df.values, levels=black_levels, colors='black', linewidths=2.5)
 
                 ax.set_title(title, fontweight='bold', fontsize=16)
-                ax.set_xlabel(r"Evasion Heterogeneity ($\sigma_{\nu}$)")
+                ax.set_xlabel(r"Evasion Heterogeneity (${\nu}$)")
                 ax.set_ylabel(r"Evasion Progressivity ($\gamma$)" if col == 0 else "")
 
             except FileNotFoundError:
@@ -855,7 +917,7 @@ def plot_fixed_theta_1x2_metric(metric, file_prefix, cbar_label, cmap, norm=None
                                pivot_df.values, levels=black_levels, colors='black', linewidths=2.5)
 
                 ax.set_title(title, fontweight='bold', fontsize=16)
-                ax.set_xlabel(r"Evasion Heterogeneity ($\sigma_{\nu}$)")
+                ax.set_xlabel(r"Evasion Heterogeneity ($\nu$)")
                 ax.set_ylabel(r"Evasion Progressivity ($\gamma$)" if col == 0 else "")
 
             except FileNotFoundError:
@@ -950,7 +1012,7 @@ def plot_fixed_theta_narrow_1x2_metric(metric, file_prefix, cmap='RdBu', fmt=".1
                 )
 
                 ax.set_title(title, fontsize=12, fontweight='bold')
-                ax.set_xlabel(r"Evasion Heterogeneity ($\sigma_{\nu}$)")
+                ax.set_xlabel(r"Evasion Heterogeneity ($\nu$)")
                 if col == 0:
                     ax.set_ylabel(r"Evasion Progressivity ($\gamma$)")
                 else:
@@ -993,10 +1055,10 @@ if __name__ == "__main__":
     
     # 2. Main Text Small Figures
     #plot_small_heatmaps()
-    #plot_share_lines()
+    plot_evasion_profiles()
     #plot_walkthrough()
     #plot_walkthrough_dollars()
-    plot_evasion_distributions(gamma=0.05, nu=1.4)
+    #plot_evasion_distributions(gamma=0.05, nu=1.4)
     
     # 3. Original Dynamic Heatmaps
     #generate_all_robustness_1x2()

@@ -26,7 +26,9 @@ WALKTHROUGH_BETA = 0.05
 WALKTHROUGH_SIGMA = 1.4
 WALKTHROUGH_SCENARIOS = [
     ("Proportional Evasion", 0.0, 0.0),
-    ("Prog / Hetero", 0.05, 1.4),
+    ("Progressive, Heterogeneous Evasion", WALKTHROUGH_BETA, WALKTHROUGH_SIGMA),
+    ("Strongly Progressive Heterogeneous", 0.10, 1.4),
+    ("Regressive Heterogeneous", -0.05, 1.4),
 ]
 BETA_VALS = np.round(np.arange(-0.10, 0.31, 0.05), 2)
 SIGMA_VALS = np.round(np.arange(0.0, 3.1, 0.2), 1)
@@ -180,6 +182,11 @@ def compute_single_cell(beta, snu, n_agents_final, inc_dist='lognormal', noise_d
     rate_1pct = (true_dollars_1pct - rep_dollars_1pct) / true_dollars_1pct
     rate_01pct = (true_dollars_01pct - rep_dollars_01pct) / true_dollars_01pct
     
+    # 4. Compact heterogeneity stats for the true top 1%
+    ev_true_top1 = ev_rates[true_top1_idx]
+    p90_evasion_top1 = np.percentile(ev_true_top1, 90)
+    frac_true_not_in_rep = 1 - len(set(true_top1_idx) & set(idx_r[-k1:])) / k1
+    
     return {
         'Beta': beta, 'Sigma': snu,
         'gap_1pct': (y_rep_s[-k1:].sum() / total_rep) - (y_true_s[-k1:].sum() / total_true),
@@ -190,7 +197,9 @@ def compute_single_cell(beta, snu, n_agents_final, inc_dist='lognormal', noise_d
         's_true': y_true_s[-k1:].sum() / total_true,
         's_rep': y_rep_s[-k1:].sum() / total_rep,
         's_true_given_rep': s_true_given_rep,
-        'agg_gap': (total_true - total_rep) / total_true
+        'agg_gap': (total_true - total_rep) / total_true,
+        'p90_evasion_top1': p90_evasion_top1,
+        'frac_reranked_top1': frac_true_not_in_rep
     }
 
 
@@ -259,6 +268,7 @@ def compute_core_grid(n_agents=1000000):
 # =============================================================================
 # 2. WALKTHROUGH & INTUITION COMPUTATIONS
 # =============================================================================
+
 def compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_dist='lognormal', noise_dist='beta',
                         scenarios=None):
     """
@@ -278,19 +288,20 @@ def compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_di
     
     print(f"--- COMPUTING SCALED WALKTHROUGH ({len(scenarios)} scenarios) ---")
     print(f"Scaling factor: {scale_factor:.1f}x ({n_target_pop:,} target)")
- 
-    decomp_list = []  # Accumulates share decomposition stats for the walkthrough table
+
+    decomp_list = []   # Share decomposition stats for the walkthrough table
+    profile_list = []  # Heterogeneity profile stats
 
     for idx, (label, beta, sigma_nu) in enumerate(scenarios):
         print(f"\n  Scenario {idx}: {label} (Beta={beta}, Sigma={sigma_nu})")
         
         # --- Build the economy ---
-        y_true, y_rep, _, _ = _build_economy(
+        y_true, y_rep, ev_rates, _ = _build_economy(
             beta, sigma_nu, n_agents_sample, inc_dist, noise_dist
         )
         
         # --- KDE subsample ---
-        n_kde = min(200_000, n_agents_sample)
+        n_kde = min(1_000_000, n_agents_sample)
         kde_idx = np.random.choice(n_agents_sample, n_kde, replace=False)
         pd.DataFrame({
             'True': y_true[kde_idx],
@@ -334,6 +345,42 @@ def compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_di
             's_rep_given_true': s_rep_given_true
         })
         
+        # --- Heterogeneity profile ---
+        ev_true_top1 = ev_rates[idx_t[-k1:]]
+        true_top1_y = y_true[idx_t[-k1:]]
+        true_top1_r = y_rep[idx_t[-k1:]]
+        unreported_top1 = true_top1_y - true_top1_r
+        
+        # Concentration: share of top-1% unreported $ from top 10% of evaders
+        k_top10 = int(k1 * 0.10)
+        top_evaders_idx = np.argsort(unreported_top1)[-k_top10:]
+        share_from_top10 = unreported_top1[top_evaders_idx].sum() / unreported_top1.sum()
+        
+        # Mobility: fraction of true top 1% not in reported top 1%
+        true_top1_set = set(idx_t[-k1:])
+        rep_top1_set = set(idx_r[-k1:])
+        frac_true_not_in_rep = 1 - len(true_top1_set & rep_top1_set) / k1
+        
+        # Rank correlation (subsample for speed)
+        from scipy.stats import spearmanr
+        n_corr = min(1_000_000, n_agents_sample)
+        corr_idx = np.random.choice(n_agents_sample, n_corr, replace=False)
+        rho, _ = spearmanr(y_true[corr_idx], y_rep[corr_idx])
+        
+        profile_list.append({
+            'Scenario': label, 'Beta': beta, 'Sigma': sigma_nu,
+            'Aggregate_Gap': tax_gap,
+            'DW_Evasion_Top1': (true_top1_y.sum() - true_top1_r.sum()) / true_top1_y.sum(),
+            'Median_Evasion_Top1': np.median(ev_true_top1),
+            'P75_Evasion_Top1': np.percentile(ev_true_top1, 75),
+            'P90_Evasion_Top1': np.percentile(ev_true_top1, 90),
+            'Frac_Above_25pct': (ev_true_top1 > 0.25).mean(),
+            'Frac_Above_50pct': (ev_true_top1 > 0.50).mean(),
+            'Share_From_Top10_Evaders': share_from_top10,
+            'Frac_True_Top1_Not_In_Rep_Top1': frac_true_not_in_rep,
+            'Spearman_Rho': rho
+        })
+        
         grid_pct = np.logspace(0, -2, 100)
         
         true_sorted = y_true[idx_t]
@@ -366,7 +413,39 @@ def compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_di
             'evasion_rate_rep_top': es_rep
         }).to_csv(f"data_walkthrough_scaled_lines_{idx}.csv", index=False)
         
-        del y_true, y_rep
+        # --- Evasion profile by income bin (for plot_evasion_profiles) ---
+        print("  Computing Evasion Profiles by Income Bin...")
+        income_bin_edges = np.logspace(np.log10(100), np.log10(3e6), 50)
+        bin_centers = np.sqrt(income_bin_edges[:-1] * income_bin_edges[1:])
+        
+        bins_by_true = np.digitize(y_true, income_bin_edges) - 1
+        bins_by_rep  = np.digitize(np.maximum(y_rep, 1), income_bin_edges) - 1
+        
+        n_bins = len(bin_centers)
+        avg_by_true = np.full(n_bins, np.nan)
+        avg_by_rep  = np.full(n_bins, np.nan)
+        n_obs_true  = np.zeros(n_bins, dtype=int)
+        n_obs_rep   = np.zeros(n_bins, dtype=int)
+        
+        for b in range(n_bins):
+            mask_t = (bins_by_true == b)
+            mask_r = (bins_by_rep == b)
+            n_obs_true[b] = mask_t.sum()
+            n_obs_rep[b]  = mask_r.sum()
+            if n_obs_true[b] > 100:
+                avg_by_true[b] = ev_rates[mask_t].mean()
+            if n_obs_rep[b] > 100:
+                avg_by_rep[b]  = ev_rates[mask_r].mean()
+        
+        pd.DataFrame({
+            'income_center': bin_centers,
+            'avg_evasion_by_true': avg_by_true,
+            'avg_evasion_by_rep': avg_by_rep,
+            'n_obs_true': n_obs_true,
+            'n_obs_rep': n_obs_rep,
+        }).to_csv(f"data_walkthrough_evasion_profile_{idx}.csv", index=False)
+        
+        del y_true, y_rep, ev_rates
 
     # Save scenario metadata for the plotting script
     pd.DataFrame([
@@ -377,9 +456,16 @@ def compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_di
     # Save share decomposition table
     pd.DataFrame(decomp_list).to_csv("data_walkthrough_stats.csv", index=False)
 
+    # Save heterogeneity profile table
+    pd.DataFrame(profile_list).to_csv("data_heterogeneity_profile.csv", index=False)
+
     print("\nWalkthrough data saved for all scenarios.")
 
 
+
+
+
+        # M
 def calculate_parameter_intuition(gamma=0.05, sigma_nu=1.4, inc_dist='lognormal', noise_dist='beta', n_agents=5000000):
     """
     Calculates reporting intuition using the unified math engine.
@@ -462,7 +548,7 @@ if __name__ == "__main__":
 
     # 2. SCALED WALKTHROUGH (Main Figures)
     # Generates totals for 330M population and Option A line curves.
-    compute_walkthrough(n_agents_sample=50000000, n_target_pop=330000000, inc_dist='lognormal', noise_dist='beta')
+    compute_walkthrough(n_agents_sample=10000000, n_target_pop=330000000, inc_dist='lognormal', noise_dist='beta')
 
     # 3. BASELINE GRID (Table 1)
     # A smaller, high-precision run for the main text tables.
@@ -498,6 +584,3 @@ if __name__ == "__main__":
 
     elapsed = time.time() - start_time
     print(f"\n--- Total Execution Time: {elapsed/60:.2f} minutes ---")
-
-
-
