@@ -26,8 +26,8 @@ WALKTHROUGH_BETA = 0.05
 WALKTHROUGH_SIGMA = 1.4
 WALKTHROUGH_SCENARIOS = [
     ("Proportional Evasion", 0.0, 0.0),
-    ("Progressive, Heterogeneous Evasion", WALKTHROUGH_BETA, WALKTHROUGH_SIGMA),
-    ("Strongly Progressive Heterogeneous", 0.10, 1.4),
+    ("Progressive, Heterogeneous", WALKTHROUGH_BETA, WALKTHROUGH_SIGMA),
+    ("Strong Progressive Heterogeneous", 0.10, 1.4),
     ("Regressive Heterogeneous", -0.05, 1.4),
 ]
 BETA_VALS = np.round(np.arange(-0.10, 0.31, 0.05), 2)

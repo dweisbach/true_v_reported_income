@@ -118,7 +118,7 @@ def plot_walkthrough():
         return
     
     n_rows = len(df_scenarios)
-    fig, axes = plt.subplots(n_rows, 2, figsize=(14, 6 * n_rows))
+    fig, axes = plt.subplots(n_rows, 2, figsize=(.72*14, .72*6 * n_rows))
     
     # Handle single-row case (axes shape is (2,) not (1,2))
     if n_rows == 1:
@@ -243,7 +243,7 @@ def plot_walkthrough_dollars():
     import matplotlib.ticker as mticker
     
     n_panels = len(df_scenarios)
-    fig, axes = plt.subplots(1, n_panels, figsize=(7 * n_panels, 6))
+    fig, axes = plt.subplots(1, n_panels, figsize=(.72*7 * n_panels, .72*6))
     
     if n_panels == 1:
         axes = [axes]
@@ -536,7 +536,7 @@ def plot_evasion_distributions(gamma=0.05, nu=1.4, idx=None):
     # --- Plot ----------------------------------------------------------
     COLOR = 'steelblue'
     YMAX = 1.2
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(.72*13, .72*5))
 
     ax = axes[0]
     ax.plot(e_grid, pdf_top, color=COLOR, lw=2.5)
@@ -601,7 +601,7 @@ def plot_evasion_profiles(scenarios=None):
         print("  [Warning] data_walkthrough_scenarios.csv not found.")
         return
 
-    fig, axes = plt.subplots(1, len(scenarios), figsize=(7 * len(scenarios), 5),
+    fig, axes = plt.subplots(1, len(scenarios), figsize=(.72*7 * len(scenarios), .72*5),
                              sharey=True)
     if len(scenarios) == 1:
         axes = [axes]
@@ -667,7 +667,7 @@ def _plot_heatmap_set(df, suffix, is_big):
     gini_kw = dict(annot=not is_big, fmt=".3f", cbar=is_big, xticklabels=tick_step, yticklabels=tick_step)
 
     # --- A. Evasion Rates (Separate) ---
-    fig, ax = plt.subplots(1, 2, figsize=(14, 6))
+    fig, ax = plt.subplots(1, 2, figsize=(.72*14, .72*6))
     sns.heatmap(r1, ax=ax[0], cmap="Reds", **pct_kw_left)
     ax[0].set(title="Avg Evasion Rate (Top 1%)", ylabel=r"Evasion Progressivity ($\gamma$)", xlabel=r"Evasion Heterogeneity ($\nu$)")
     sns.heatmap(r01, ax=ax[1], cmap="Reds", **pct_kw_right)
@@ -685,7 +685,7 @@ def _plot_heatmap_set(df, suffix, is_big):
     plt.savefig(f"Fig_TaxGap{suffix}.pdf")
 
     # --- C. Reported Income Gaps ---
-    fig, ax = plt.subplots(1, 2, figsize=(14, 6))
+    fig, ax = plt.subplots(1, 2, figsize=(.72*14, .72*6))
     max_gap = max(np.abs(g1.values).max(), np.abs(g01.values).max())
     div_kw_right = {**pct_kw_right, "cmap": "RdBu", "center": 0, "vmin": -max_gap, "vmax": max_gap}
     div_kw_left = {**div_kw_right, "cbar": False}
@@ -712,7 +712,7 @@ def _plot_heatmap_set(df, suffix, is_big):
     plt.savefig(f"Fig_GiniGap{suffix}.pdf")
     
     # --- E. COMBINED: Evasion Rate (1%) & Aggregate Gap ---
-    fig, ax = plt.subplots(1, 2, figsize=(14, 6))
+    fig, ax = plt.subplots(1, 2, figsize=(.72*14, .72*6))
     sns.heatmap(r1, ax=ax[0], cmap="Reds", **pct_kw_left)
     ax[0].set(title="A. Avg Evasion Rate (Top 1%)", ylabel=r"Evasion Progressivity ($\gamma$)", xlabel=r"Evasion Heterogeneity ($\nu$)")
     
@@ -730,7 +730,7 @@ def _plot_heatmap_set(df, suffix, is_big):
             g.index = [f"{idx:.2f}" for idx in g.index]
             g.columns = [f"{col:.1f}" for col in g.columns]
         
-        fig, ax = plt.subplots(1, 2, figsize=(14, 6))
+        fig, ax = plt.subplots(1, 2, figsize=(.72*14, .72*6))
         sns.heatmap(p90, ax=ax[0], cmap="Reds", **pct_kw_left)
         ax[0].set(title="A. 90th Pct Evasion (Top 1%)", ylabel=r"Evasion Progressivity ($\gamma$)", xlabel=r"Evasion Heterogeneity ($\nu$)")
         
@@ -776,7 +776,7 @@ def plot_robustness_1x2_metric(metric, file_prefix, cbar_label, cmap, norm=None,
             max_beta = 0.15  
             max_sigma = 2.0  
 
-        fig, axes = plt.subplots(1, 2, figsize=(16, 6), constrained_layout=True)
+        fig, axes = plt.subplots(1, 2, figsize=(.72*16, .72*6), constrained_layout=True)
         mappable = None
 
         for col, (title, filename) in enumerate(panels):
@@ -891,7 +891,7 @@ def plot_fixed_theta_1x2_metric(metric, file_prefix, cbar_label, cmap, norm=None
             max_beta = 0.15  
             max_sigma = 2.0  
 
-        fig, axes = plt.subplots(1, 2, figsize=(16, 6), constrained_layout=True)
+        fig, axes = plt.subplots(1, 2, figsize=(.72*16, .72*6), constrained_layout=True)
         mappable = None
 
         for col, (title, filename) in enumerate(panels):
@@ -981,7 +981,7 @@ def plot_fixed_theta_narrow_1x2_metric(metric, file_prefix, cmap='RdBu', fmt=".1
     }
 
     for dist_name, panels in data_groups.items():
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6)) # Match original Fig_ReportedGap size
+        fig, axes = plt.subplots(1, 2, figsize=(.72*14, .72*6)) # Match original Fig_ReportedGap size
         
         # 1. First pass: find the global max absolute value across BOTH panels 
         # so the color scale is uniformly vibrant for the whole figure
@@ -1065,24 +1065,24 @@ if __name__ == "__main__":
     print("--- tax_model.py Plotting Execution ---")
     
     # 1. Main Text Tables
-    #plot_table1()
-    #plot_walkthrough_table()
-    #plot_heterogeneity_table()
+    plot_table1()
+    plot_walkthrough_table()
+    plot_heterogeneity_table()
     
-    # 2. Main Text Small Figures
-    #plot_small_heatmaps()
-    #plot_evasion_profiles()
-    #plot_walkthrough()
-    #plot_walkthrough_dollars()
-    #plot_evasion_distributions(gamma=0.05, nu=.2)
+    # # 2. Main Text Small Figures
+    plot_small_heatmaps()
+    plot_evasion_profiles()
+    plot_walkthrough()
+    plot_walkthrough_dollars()
+    plot_evasion_distributions(gamma=0.05, nu=1.4)
     
-    # 3. Original Dynamic Heatmaps
-    #generate_all_robustness_1x2()
-    generate_all_gini_1x2()
-    # 4. NEW: Fixed-Theta Heatmaps
-    #generate_all_fixed_theta_1x2()
+    # # 3. Original Dynamic Heatmaps
+    generate_all_robustness_1x2()
     
-    # 5. NEW: Annotated Narrow Grids
-    #generate_fixed_theta_narrow_grids()
+    # # 4. NEW: Fixed-Theta Heatmaps
+    generate_all_fixed_theta_1x2()
+    
+    # # 5. NEW: Annotated Narrow Grids
+    generate_fixed_theta_narrow_grids()
 
     print("\n=== ALL FIGURES GENERATED SUCCESSFULLY ===")
