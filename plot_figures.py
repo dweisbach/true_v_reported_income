@@ -848,6 +848,22 @@ def generate_all_robustness_1x2():
         black_levels=[0]
     )
 
+
+def generate_all_gini_1x2():
+    """1x2 Gini-gap heatmaps for the four (income x evasion) robustness panels."""
+    print("Generating Gini Gap 1x2 Robustness Heatmap Sets...")
+    plot_robustness_1x2_metric(
+        metric='gini_diff',
+        file_prefix='Fig_Gini_1x2',
+        cbar_label='Gini Gap (Reported - True)',
+        cmap='RdBu',
+        vmin=-0.05,
+        vmax=0.05,
+        black_levels=[0]
+    )
+
+
+
 # =============================================================================
 # 3. FIXED-THETA HEATMAP GENERATION (NEW)
 # =============================================================================
@@ -1055,14 +1071,14 @@ if __name__ == "__main__":
     
     # 2. Main Text Small Figures
     #plot_small_heatmaps()
-    plot_evasion_profiles()
+    #plot_evasion_profiles()
     #plot_walkthrough()
     #plot_walkthrough_dollars()
-    #plot_evasion_distributions(gamma=0.05, nu=1.4)
+    #plot_evasion_distributions(gamma=0.05, nu=.2)
     
     # 3. Original Dynamic Heatmaps
     #generate_all_robustness_1x2()
-    
+    generate_all_gini_1x2()
     # 4. NEW: Fixed-Theta Heatmaps
     #generate_all_fixed_theta_1x2()
     
