@@ -41,11 +41,21 @@ def lognormal_mu(mean, sigma):
     return np.log(mean) - 0.5 * sigma ** 2
  
  
-def simulate(N, mean_w, sigma_w, mean_p, sigma_p, e_p, e_w=0.0, seed=None):
-    """Draw a population and return (true income, reported income, wage, pass-through)."""
+def simulate(N, mean_w, sigma_w, mean_p, sigma_p, e_p, e_w=0.0, seed=None,mixalpha=.01,mixbeta=.09):
+    """
+    Draw a population and return (true income, reported income, wage, pass-through).
+     - Wage and pass-through are mean_w, sigma_w, mean_p, sigma_p
+     - Each persion has some fraction wage income, some pass-through
+       - The fraction of pass-through is Beta-distributed with mean = mixalpha/(mixalpah+mixbeta)
+       - For various values of (mixalpha, mixbeta) all with mean 10% passthrough: 
+         - (10,90) very concentrated at 10% (no heterogeneity, almost everyone has 10% pass-through)
+         - (1,9) pretty smooth around 10% (some heterogeneity within people)
+         - (.01,.09) very concnetrated at 0% and 100% (people have wage or pass-through, with strict proprtionality) 
+    """
     rng = np.random.default_rng(seed)
-    w = rng.lognormal(lognormal_mu(mean_w, sigma_w), sigma_w, N)
-    pt = rng.lognormal(lognormal_mu(mean_p, sigma_p), sigma_p, N)
+    pt_rate = rng.beta(mixalpha, mixbeta, N)
+    w = (1-pt_rate)*rng.lognormal(lognormal_mu(mean_w, sigma_w), sigma_w, N)
+    pt = pt_rate*rng.lognormal(lognormal_mu(mean_p, sigma_p), sigma_p, N)
     y = w + pt
     r = (1.0 - e_w) * w + (1.0 - e_p) * pt
     return y, r, w, pt
@@ -179,13 +189,15 @@ if __name__ == "__main__":
     # Use a smaller N for development; raise toward 330e6 for a headline run.
     N = 5_000_000
  
-    MEAN_W, SIGMA_W = 25_000, 0.7    # wage: modest dispersion, no evasion
-    MEAN_P = 40_000                  # pass-through mean -> aggregate share = 15k/65k = 0.231
-    E_P, E_W = 0.35, 0.0             # evade 30% of pass-through, nothing on wage
+    MEAN_W, SIGMA_W = 53_000, 1.4    # wage: modest dispersion, no evasion
+    MEAN_P = 144_000                  # pass-through mean -> aggregate share = 15k/65k = 0.231
+    E_P, E_W = 0.5, 0.0             # evade 30% of pass-through, nothing on wage
  
     print("Calibrating sigma_p to a 20% reported top-1% share ...")
     sigma_p = calibrate_sigma_p(N, MEAN_W, SIGMA_W, MEAN_P, E_P,
                                 target=0.20, e_w=E_W, seed=0)
+    sigma_p = 1.5
+#    sigma_p = 1.77148
     print(f"  sigma_p = {sigma_p:.4f}\n")
  
     y, r, w, pt = simulate(N, MEAN_W, SIGMA_W, MEAN_P, sigma_p, E_P, E_W, seed=0)
