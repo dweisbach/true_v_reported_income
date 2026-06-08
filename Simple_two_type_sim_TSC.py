@@ -41,15 +41,15 @@ def lognormal_mu(mean, sigma):
     return np.log(mean) - 0.5 * sigma ** 2
  
  
-def simulate(N, mean_w, sigma_w, mean_p, sigma_p, e_p, e_w=0.0, seed=None,mixalpha=.01,mixbeta=.09):
+def simulate(N, mean_w, sigma_w, mean_p, sigma_p, e_p, e_w=0.0, seed=None,mixalpha=1.,mixbeta=9.):
     """
     Draw a population and return (true income, reported income, wage, pass-through).
      - Wage and pass-through are mean_w, sigma_w, mean_p, sigma_p
-     - Each persion has some fraction wage income, some pass-through
-       - The fraction of pass-through is Beta-distributed with mean = mixalpha/(mixalpah+mixbeta)
-       - For various values of (mixalpha, mixbeta) all with mean 10% passthrough: 
-         - (10,90) very concentrated at 10% (no heterogeneity, almost everyone has 10% pass-through)
-         - (1,9) pretty smooth around 10% (some heterogeneity within people)
+     - Each persion has a mixture of wage income and pass-through
+       - The mixing factor for pass-through is Beta-distributed with mean = mixalpha/(mixalpah+mixbeta)
+       - For various values of (mixalpha, mixbeta) all with mean 10% mixing (for passthrough): 
+         - (10,90) very concentrated at 10% (no heterogeneity, almost everyone is mixing 10/90 pass-through)
+         - (1,9) pretty smooth around 10% (some heterogeneity in mixing within people)
          - (.01,.09) very concnetrated at 0% and 100% (people have wage or pass-through, with strict proprtionality) 
     """
     rng = np.random.default_rng(seed)
@@ -200,7 +200,7 @@ if __name__ == "__main__":
 #    sigma_p = 1.77148
     print(f"  sigma_p = {sigma_p:.4f}\n")
  
-    y, r, w, pt = simulate(N, MEAN_W, SIGMA_W, MEAN_P, sigma_p, E_P, E_W, seed=0)
+    y, r, w, pt = simulate(N, MEAN_W, SIGMA_W, MEAN_P, sigma_p, E_P, E_W, seed=0,mixalpha=10.,mixbeta=90.)
     M = compute_metrics(y, r)
  
     pt_share = pt.sum() / y.sum()
