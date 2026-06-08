@@ -200,7 +200,9 @@ if __name__ == "__main__":
 #    sigma_p = 1.77148
     print(f"  sigma_p = {sigma_p:.4f}\n")
  
-    y, r, w, pt = simulate(N, MEAN_W, SIGMA_W, MEAN_P, sigma_p, E_P, E_W, seed=0,mixalpha=10.,mixbeta=90.)
+    mixalpha = 0.01
+    mixbeta = 0.09
+    y, r, w, pt = simulate(N, MEAN_W, SIGMA_W, MEAN_P, sigma_p, E_P, E_W, seed=0,mixalpha=mixalpha,mixbeta=mixbeta)
     M = compute_metrics(y, r)
  
     pt_share = pt.sum() / y.sum()
@@ -217,6 +219,8 @@ if __name__ == "__main__":
     print(f"Avg evasion, true top 1%     : {M['rate_1pct']:6.4f}")
     print(f"Frac true top 1% reranked out: {M['frac_reranked']:6.3f}")
     print(f"Gini gap (reported - true)   : {M['gini_diff']:+6.4f}")
+    print(f"Mixing alpha & beta          : {mixalpha:+6.3f}, {mixbeta:+6.3f}")
+    
  
     # --- Optional sweep (set to True to run) ---
     RUN_GRID = False
